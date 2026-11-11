@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "_note": "PLACEHOLDER. Fill in once the ONNX models are built and uploaded as GitHub Release assets. Do not commit model files to the repo.",
+  "models": [
+    {
+      "id": "default",
+      "name": "TODO",
+      "version": "TODO",
+      "format": "onnx",
+      "url": "TODO release asset URL",
+      "sha256": "TODO",
+      "size_bytes": 0,
+      "default": true
+    }
+  ]
+}
