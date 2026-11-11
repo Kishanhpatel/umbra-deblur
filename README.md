@@ -2,7 +2,7 @@
 
 Umbra Deblur is an AI deblur (deconvolution) tool for [Siril](https://siril.org), aimed at small-scope images (Seestar, Dwarf and similar) but usable on any linear image. It is a Siril Python script with an AI model. It runs locally on your computer and is free. It used to be called Umbra Deconvolve.
 
-**Status: Beta (v0.1.0).** Expect rough edges.
+**Status: Beta (v0.1.1).** Expect rough edges.
 
 ![Umbra Deblur panel](docs/screenshots/Umbra_Deblur_panel.png)
 
@@ -101,7 +101,7 @@ Small images: the model uses fixed 512 px tiles. A 300 x 250 crop matched the re
 
 ## Layout
 
-- `Umbra_Deblur.py`: the script (v0.1.0, ONNX Runtime, with model download and update check)
+- `Umbra_Deblur.py`: the script (v0.1.1, ONNX Runtime, with model download and update check)
 - `models/models.json`: model manifest (name, version, download URL, SHA-256, size)
 - `docs/screenshots/`: panel screenshots
 - `LICENSE`, `LICENSE-MODELS.md`: licenses
