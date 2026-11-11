@@ -2,7 +2,7 @@
 
 Umbra Deblur is an AI deblur (deconvolution) tool for [Siril](https://siril.org), aimed at small-scope images (Seestar, Dwarf and similar) but usable on any linear image. It is a Siril Python script with an AI model. It runs locally on your computer and is free. It used to be called Umbra Deconvolve.
 
-**Status: Beta (v0.1.1).** Expect rough edges.
+**Status: Beta (v0.2.0).** Expect rough edges.
 
 ![Umbra Deblur panel](docs/screenshots/Umbra_Deblur_panel.png)
 
@@ -79,7 +79,14 @@ The old files are byte-for-byte the same models. If you already have them they k
 
 ## GPU acceleration
 
-Providers are tried in this order: CUDA, DirectML (Windows), ROCm (AMD on Linux), Core ML (Mac), then CPU. Each one is checked against the CPU result on a small probe tile before it is used. If the result differs, or the provider fails, the script falls back to the CPU. The status line says which one ran ("Ran on ..."). Set `UMBRA_DEBLUR_CPU=1` to force the CPU. On first run the script installs the matching onnxruntime package for your system: `onnxruntime-directml` (Windows), `onnxruntime-gpu` (Linux with an NVIDIA GPU) or plain `onnxruntime` (everything else).
+The GPU is used by default whenever one can be used, and the CPU only as a fallback. Providers are tried in this order: CUDA (NVIDIA), DirectML (Windows), ROCm and MIGraphX (AMD on Linux), OpenVINO (Intel), Core ML (Mac), then CPU. Each one is checked against the CPU result on a small probe tile before it is used; if it fails or the result differs, the script falls back to the CPU. The status line says which one ran ("Ran on ..."). Set `UMBRA_DEBLUR_CPU=1` to force the CPU.
+
+On first run the script installs the onnxruntime package that gives your system a GPU:
+
+- **Mac:** `onnxruntime` (Core ML, Apple GPU, built in).
+- **Windows:** `onnxruntime-directml` (any DirectX 12 GPU: NVIDIA, AMD or Intel; no extra downloads).
+- **Linux with an NVIDIA GPU:** `onnxruntime-gpu` (CUDA). If the system has no CUDA 12 / cuDNN 9 libraries, NVIDIA's own pip packages of them are installed too (a one-time download of about 2 to 3 GB).
+- **Linux with AMD or Intel graphics:** there is no GPU build that installs automatically, so these run on the CPU. If you install `onnxruntime-rocm`, `onnxruntime-migraphx` or `onnxruntime-openvino` yourself in Siril's Python, the script uses it.
 
 ## Testing
 
@@ -101,7 +108,7 @@ Small images: the model uses fixed 512 px tiles. A 300 x 250 crop matched the re
 
 ## Layout
 
-- `Umbra_Deblur.py`: the script (v0.1.1, ONNX Runtime, with model download and update check)
+- `Umbra_Deblur.py`: the script (v0.2.0, ONNX Runtime, with model download and update check)
 - `models/models.json`: model manifest (name, version, download URL, SHA-256, size)
 - `docs/screenshots/`: panel screenshots
 - `LICENSE`, `LICENSE-MODELS.md`: licenses
