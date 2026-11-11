@@ -1,6 +1,5 @@
 {
   "schema": 1,
-  "_note": "PLACEHOLDER. Fill in once the ONNX models are built and uploaded as GitHub Release assets. Do not commit model files to the repo.",
   "models": [
     {
       "id": "umbra-deconvolution-1.0",
@@ -9,10 +8,10 @@
       "experimental": false,
       "default": true,
       "format": "onnx",
-      "file": "TODO",
-      "url": "TODO release asset URL",
-      "sha256": "TODO",
-      "size_bytes": 0
+      "file": "umbra_deconvolution_1.0.onnx",
+      "url": "https://github.com/Kishanhpatel/umbra-deconvolve/releases/download/v0.0.13/umbra_deconvolution_1.0.onnx",
+      "sha256": "c67c60a08257b470b1d9f8c621aa48e3423a98bed79ebd4b0dfeff07535faf8b",
+      "size_bytes": 198635024
     },
     {
       "id": "umbra-deconvolution-1.1a",
@@ -21,10 +20,10 @@
       "experimental": true,
       "default": false,
       "format": "onnx",
-      "file": "TODO",
-      "url": "TODO release asset URL",
-      "sha256": "TODO",
-      "size_bytes": 0
+      "file": "umbra_deconvolution_1.1a_experimental.onnx",
+      "url": "https://github.com/Kishanhpatel/umbra-deconvolve/releases/download/v0.0.13/umbra_deconvolution_1.1a_experimental.onnx",
+      "sha256": "f09c793fabce0be34fb23c27b3885e16a1879064af8291a4fdc25ac1f79e91e2",
+      "size_bytes": 198635024
     }
   ]
 }

@@ -2,7 +2,7 @@
 
 AI deconvolution (sharpening) for [Siril](https://siril.org), aimed at small-scope images (Seestar, Dwarf and similar) but usable on any linear image. The goal is a free alternative to commercial AI deconvolution tools. It does not yet match them on the very finest detail (see Weaknesses).
 
-> **Status: preview, not released yet.** The ONNX Runtime script and the models are not in this repository yet. Nothing here is final.
+> **Status: preview (v0.0.13).** Expect rough edges. Not yet tested inside Siril on Windows or Linux.
 
 ## What it does
 
@@ -46,7 +46,7 @@ Providers are tried in this order: CUDA, DirectML (Windows), ROCm (AMD on Linux)
 
 ## Layout
 
-- `Umbra_Deconvolve.py`: the script (placeholder until the ONNX version is added)
+- `Umbra_Deconvolve.py`: the script (v0.0.13, ONNX Runtime)
 - `models/models.json`: model manifest (name, version, download URL, SHA-256)
 - `docs/`: documentation, with `docs/screenshots/` for images
 
