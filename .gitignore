@@ -10,3 +10,7 @@ __pycache__/
 *.tif
 *.tiff
 _work/
+*.png
+*.jpg
+*.jpeg
+!docs/screenshots/*.png

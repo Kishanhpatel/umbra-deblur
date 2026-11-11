@@ -11,7 +11,8 @@
       "file": "umbra_deconvolution_1.0.onnx",
       "url": "https://github.com/Kishanhpatel/umbra-deconvolve/releases/download/v0.0.13/umbra_deconvolution_1.0.onnx",
       "sha256": "c67c60a08257b470b1d9f8c621aa48e3423a98bed79ebd4b0dfeff07535faf8b",
-      "size_bytes": 198635024
+      "size_bytes": 198635024,
+      "legacy": true
     },
     {
       "id": "umbra-deconvolution-1.1a",
@@ -23,11 +24,36 @@
       "file": "umbra_deconvolution_1.1a_experimental.onnx",
       "url": "https://github.com/Kishanhpatel/umbra-deconvolve/releases/download/v0.0.13/umbra_deconvolution_1.1a_experimental.onnx",
       "sha256": "f09c793fabce0be34fb23c27b3885e16a1879064af8291a4fdc25ac1f79e91e2",
+      "size_bytes": 198635024,
+      "legacy": true
+    },
+    {
+      "id": "umbra_deblur_v1.0",
+      "name": "Umbra Deblur v1.0",
+      "version": "1.0",
+      "experimental": false,
+      "default": true,
+      "format": "onnx",
+      "file": "umbra_deblur_v1.0.onnx",
+      "url": "https://github.com/Kishanhpatel/umbra-deblur/releases/download/v0.1.0/umbra_deblur_v1.0.onnx",
+      "sha256": "c67c60a08257b470b1d9f8c621aa48e3423a98bed79ebd4b0dfeff07535faf8b",
+      "size_bytes": 198635024
+    },
+    {
+      "id": "umbra_deblur_v1.1_experimental",
+      "name": "Umbra Deblur v1.1 (experimental)",
+      "version": "1.1",
+      "experimental": true,
+      "default": false,
+      "format": "onnx",
+      "file": "umbra_deblur_v1.1_experimental.onnx",
+      "url": "https://github.com/Kishanhpatel/umbra-deblur/releases/download/v0.1.0/umbra_deblur_v1.1_experimental.onnx",
+      "sha256": "f09c793fabce0be34fb23c27b3885e16a1879064af8291a4fdc25ac1f79e91e2",
       "size_bytes": 198635024
     }
   ],
   "script": {
-    "version": "0.0.14",
-    "url": "https://github.com/Kishanhpatel/umbra-deconvolve/releases/tag/v0.0.14"
+    "version": "0.1.0",
+    "url": "https://github.com/Kishanhpatel/umbra-deconvolve/releases/tag/v0.1.0"
   }
 }
