@@ -2,7 +2,7 @@
 
 AI deconvolution (sharpening) for [Siril](https://siril.org), aimed at small-scope images (Seestar, Dwarf and similar) but usable on any linear image. The goal is a free alternative to commercial AI deconvolution tools. It does not yet match them on the very finest detail (see Weaknesses).
 
-> **Status: preview (v0.0.13).** Expect rough edges. Not yet tested inside Siril on Windows or Linux.
+> **Status: preview (v0.0.14).** Expect rough edges. Not yet tested inside Siril on Windows or Linux.
 
 ## What it does
 
@@ -40,18 +40,19 @@ Providers are tried in this order: CUDA, DirectML (Windows), ROCm (AMD on Linux)
 
 ## Install
 
-There is no in-script model downloader yet, so models are installed by hand.
+1. Download the one file `Umbra_Deconvolve.py` from this repository and put it in your Siril scripts folder.
+2. In Siril, add that folder under Preferences > Scripts, then run **Umbra Deconvolve**.
+3. First run: if no model is installed, press **Download model**. It fetches Umbra Deconvolution 1.0 (about 199 MB) from this project's GitHub releases, checks its SHA-256, and installs it in a folder named `Umbra Deconvolve` next to the script. 1.1a experimental is optional and also downloads from the same button.
 
-1. Download `Umbra_Deconvolve.py` from this repository into your Siril scripts folder.
-2. From the [v0.0.13 release](https://github.com/Kishanhpatel/umbra-deconvolve/releases/tag/v0.0.13), download **both** `.onnx` files (about 199 MB each). Checksums are in `models/models.json`.
-3. Put the two `.onnx` files in a folder named `Umbra Deconvolve` next to the script (for example `Siril Scripts/Umbra Deconvolve/`). You can also point the `UMBRA_DECONV_MODEL_DIR` environment variable at the folder.
-4. In Siril, add the scripts folder under Preferences > Scripts, then run **Umbra Deconvolve**.
+**Updates.** **Check for updates** compares your installed models and the script version with the published list (`models/models.json`). New or changed models download only when you press the button. A newer script is shown as a link to the release page; the script never replaces itself. Nothing is sent about you or your machine (only a generic client name), and with no network the installed models keep working. Set `UMBRA_DECONV_OFFLINE=1` to turn the lookup off.
 
-**This is a pre-release.** It has been run as a standalone script and window test on one Mac, but not yet inside Siril, and not on Windows or Linux.
+Prefer manual install? Download the `.onnx` files from the [releases](https://github.com/Kishanhpatel/umbra-deconvolve/releases) into the `Umbra Deconvolve` folder, or point `UMBRA_DECONV_MODEL_DIR` at a folder with them. Standalone helpers: `--check-updates` and `--download [MODEL_ID|all]`.
+
+**This is a pre-release.** It has been run as a standalone script and window test on one Mac (including real model downloads), but not yet inside Siril, and not on Windows or Linux.
 
 ## Layout
 
-- `Umbra_Deconvolve.py`: the script (v0.0.13, ONNX Runtime)
+- `Umbra_Deconvolve.py`: the script (v0.0.14, ONNX Runtime, with model download and update check)
 - `models/models.json`: model manifest (name, version, download URL, SHA-256)
 - `docs/`: documentation, with `docs/screenshots/` for images
 

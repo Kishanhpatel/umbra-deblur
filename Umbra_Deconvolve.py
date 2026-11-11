@@ -8,10 +8,11 @@ Strength sharpens nebula/galaxy detail only (stars are only made round). Sharpen
 Automatic PSF measures the star size from the image; switch it off to set the PSF diameter by hand.
 Run in Siril (Scripts menu), or standalone:
   python Umbra_Deconvolve.py --image in.fits --out out.fits [--model PATH.onnx] [--strength 0..1] [--stars 0..1] [--halo 0..1] [--correct-only] [--fwhm PX] [--sharpening 0..8 (fb models)]
-  python Umbra_Deconvolve.py --ui-test        (opens the window on a fake image, then exits)"""
+  python Umbra_Deconvolve.py --ui-test        (opens the window on a fake image, then exits)
+  python Umbra_Deconvolve.py --check-updates | --download [MODEL_ID|all]"""
 import sys, os, json, hashlib, argparse, time
 from pathlib import Path
-_STANDALONE = any(a in ('--image', '--ui-test') or a.startswith('--image=') for a in sys.argv)
+_STANDALONE = any(a in ('--image', '--ui-test', '--download', '--check-updates') or a.startswith(('--image=', '--download=')) for a in sys.argv)
 if __name__ == '__main__' and not _STANDALONE and '--help' not in sys.argv and '-h' not in sys.argv:
     import sirilpy as _siril_deps
     def _ort_requirement():
@@ -29,7 +30,13 @@ if __name__ == '__main__' and not _STANDALONE and '--help' not in sys.argv and '
 import numpy as np
 
 APP_NAME = 'Umbra Deconvolve'
-VERSION = '0.0.13'  # preview
+VERSION = '0.0.14'  # preview
+# 0.0.14: in-script model download and update check. If no model is installed, Run is disabled and a 'Download model' button fetches it
+#        (progress, temp file, SHA-256 check against the manifest, then moved into place). 'Check for updates' compares installed models
+#        with the manifest and the script version with the latest release (it only shows a link; the script never replaces itself).
+#        Nothing is downloaded until a button is pressed; only .onnx files from this project's GitHub releases are fetched, over HTTPS,
+#        and no information about you or your machine is sent. Offline works with the installed models. UMBRA_DECONV_OFFLINE=1 turns
+#        the manifest lookup off. Standalone: --download [ID|all], --check-updates.
 # 0.0.13: runs on ONNX Runtime instead of PyTorch (no torch needed at all; one self-contained file + the .onnx models).
 #        Models are umbra_deconv_*.onnx (converted from the 0.0.12 .pt models, same outputs to within 0.5 noise-sigma on a 10-40 sigma
 #        change). GPU: CUDA (NVIDIA, Windows/Linux), DirectML (any DX12 GPU, Windows), ROCm (AMD, Linux), Core ML (Apple GPU), each checked
@@ -109,6 +116,186 @@ def remember_model(path):
         PREFS_FILE.write_text(json.dumps({'model': str(path)}))
     except Exception:
         pass
+
+
+
+# ----------------------------------------------------------------------------------------------- model download / updates
+REPO = 'Kishanhpatel/umbra-deconvolve'
+MANIFEST_URL = f'https://raw.githubusercontent.com/{REPO}/main/models/models.json'
+RELEASES_URL = f'https://github.com/{REPO}/releases'
+_REDIRECT_HOSTS = {'github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com', 'raw.githubusercontent.com'}
+import urllib.request
+USER_AGENT = 'UmbraDeconvolve'    # generic client name only; nothing about the user or the machine is sent
+
+
+class DownloadError(Exception):
+    pass
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        from urllib.parse import urlparse
+        u = urlparse(newurl)
+        if u.scheme != 'https' or u.hostname not in _REDIRECT_HOSTS:
+            raise DownloadError(f'Refused a redirect to {u.hostname or newurl}')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _ssl_context():
+    """Default certificate store; if the Python build has none (python.org macOS builds without 'Install Certificates'), use certifi's.
+    Certificates are always verified."""
+    import ssl
+    ctx = ssl.create_default_context()
+    if not ctx.cert_store_stats().get('x509_ca') and not ctx.cert_store_stats().get('x509'):
+        try:
+            import certifi
+            ctx = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            pass
+    return ctx
+
+
+def _open(url, timeout=20):
+    """The only network entry point: HTTPS GET with a generic user agent; redirects only to GitHub hosts; certificates verified."""
+    opener = urllib.request.build_opener(_SafeRedirect(), urllib.request.HTTPSHandler(context=_ssl_context()))
+    return opener.open(urllib.request.Request(url, headers={'User-Agent': USER_AGENT}), timeout=timeout)
+
+
+def _valid_model_url(url, file):
+    from urllib.parse import urlparse
+    u = urlparse(str(url))
+    return u.scheme == 'https' and u.hostname == 'github.com' and u.path.startswith(f'/{REPO}/releases/download/') and u.path.endswith('/' + file) and not u.query
+
+
+def _valid_entry(m):
+    import re
+    try:
+        f = m['file']
+        return (re.fullmatch(r'[A-Za-z0-9._-]{1,120}\.onnx', f) is not None and '..' not in f and _valid_model_url(m['url'], f)
+                and re.fullmatch(r'[0-9a-f]{64}', str(m['sha256']).lower()) is not None and int(m['size_bytes']) > 0 and bool(m.get('name')))
+    except Exception:
+        return False
+
+
+def parse_manifest(data):
+    """Validated manifest dict {'models': [...valid entries...], 'script': {'version','url'} or None}. Bad entries are dropped."""
+    if not isinstance(data, dict) or data.get('schema') != 1 or not isinstance(data.get('models'), list):
+        raise DownloadError('The model list has an unexpected format.')
+    models = [dict(m, sha256=str(m['sha256']).lower(), size_bytes=int(m['size_bytes'])) for m in data['models'] if isinstance(m, dict) and _valid_entry(m)]
+    sc = data.get('script')
+    if not (isinstance(sc, dict) and _version_tuple(sc.get('version')) and str(sc.get('url', '')).startswith(f'https://github.com/{REPO}/')):
+        sc = None
+    return dict(models=models, script=sc)
+
+
+def fetch_manifest(url=None):
+    try:
+        with _open(url or MANIFEST_URL, 20) as resp:
+            raw = resp.read(1_000_000)
+        return parse_manifest(json.loads(raw.decode('utf-8')))
+    except DownloadError:
+        raise
+    except Exception as e:
+        why = ' Certificate problem: on macOS run "Install Certificates.command" for your Python.' if 'CERTIFICATE' in str(e).upper() else ''
+        raise DownloadError(f'Could not reach the model list ({type(e).__name__}). Offline? The installed models still work.{why}') from e
+
+
+def _version_tuple(v):
+    try:
+        return tuple(int(p) for p in str(v).strip().lstrip('v').split('.'))
+    except Exception:
+        return None
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def model_state(entry, model_dir=None):
+    """'missing' | 'current' | 'update' for a manifest entry against the installed file."""
+    p = Path(model_dir or MODEL_DIR) / entry['file']
+    if not p.is_file():
+        return 'missing'
+    return 'current' if file_sha256(p) == entry['sha256'] else 'update'
+
+
+def check_updates(manifest, model_dir=None):
+    """-> dict(models=[(entry, state)], script_version=str|None, script_url=str|None, script_newer=bool)."""
+    sc = manifest.get('script')
+    newer = bool(sc) and _version_tuple(sc['version']) > (_version_tuple(VERSION) or (0,))
+    return dict(models=[(m, model_state(m, model_dir)) for m in manifest['models']],
+                script_version=sc['version'] if sc else None, script_url=sc['url'] if sc else None, script_newer=newer)
+
+
+def download_model(entry, model_dir=None, progress=None, cancel=None):
+    """Download one manifest entry into the models folder: temp file, size and SHA-256 check, then moved into place.  Returns the path."""
+    if not _valid_entry(entry):
+        raise DownloadError('Refused: not a valid model entry.')
+    d = Path(model_dir or MODEL_DIR)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        free = __import__('shutil').disk_usage(d).free
+    except OSError as e:
+        raise DownloadError(f'Cannot write to the models folder {d}: {e}') from e
+    size = int(entry['size_bytes'])
+    if free < size * 1.1:
+        raise DownloadError(f'Not enough free disk space in {d} ({size / 1e6:.0f} MB needed).')
+    part, final = d / f'.{entry["file"]}.part', d / entry['file']
+    h = hashlib.sha256(); got = 0
+    try:
+        with _open(entry['url'], 30) as resp, open(part, 'wb') as out:
+            while True:
+                if cancel and cancel():
+                    raise DownloadError('Download cancelled.')
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                got += len(chunk)
+                if got > size * 1.01 + 1024:
+                    raise DownloadError('The download is larger than expected; stopped.')
+                out.write(chunk); h.update(chunk)
+                if progress: progress(got, size)
+        if got != size:
+            raise DownloadError(f'Incomplete download ({got} of {size} bytes).')
+        if h.hexdigest() != entry['sha256']:
+            raise DownloadError('Checksum mismatch: the file was not installed. Try again later.')
+        os.replace(part, final)
+        return final
+    except DownloadError:
+        raise
+    except Exception as e:
+        raise DownloadError(f'Download failed ({type(e).__name__}: {e}).') from e
+    finally:
+        try:
+            if part.exists():
+                part.unlink()
+        except OSError:
+            pass
+
+
+def offline_mode():
+    return bool(os.environ.get('UMBRA_DECONV_OFFLINE'))
+
+
+def describe_updates(res):
+    """Plain-text summary lines for a check_updates() result."""
+    lines = []
+    if res['script_newer']:
+        lines.append(f"A newer script is available: {res['script_version']} (you have {VERSION}). {res['script_url']}")
+    elif res['script_version']:
+        lines.append(f'The script is up to date ({VERSION}).')
+    for m, st in res['models']:
+        if st == 'missing':
+            lines.append(f"Available to download: {m['name']} ({m['size_bytes'] / 1e6:.0f} MB).")
+        elif st == 'update':
+            lines.append(f"Update available for {m['name']} (the installed file differs from the published one).")
+    if not any(st != 'current' for _, st in res['models']):
+        lines.append('Installed models are up to date.')
+    return lines
 
 
 # ----------------------------------------------------------------------------------------------- engine
@@ -828,6 +1015,21 @@ def launch_gui(siril=None, fake_image=None, smoke=False):
             except Exception as e:
                 self.failed.emit(f'{type(e).__name__}: {e}')
 
+    class Task(QThread):
+        done = pyqtSignal(object)
+        failed = pyqtSignal(str)
+        prog = pyqtSignal(int, int)
+
+        def __init__(self, fn):
+            super().__init__()
+            self.fn = fn
+
+        def run(self):
+            try:
+                self.done.emit(self.fn(lambda a, b: self.prog.emit(int(a), int(b))))
+            except Exception as e:
+                self.failed.emit(str(e) if isinstance(e, DownloadError) else f'{type(e).__name__}: {e}')
+
     class Window(QWidget):
         def __init__(self):
             super().__init__()
@@ -860,6 +1062,22 @@ def launch_gui(siril=None, fake_image=None, smoke=False):
                 self.model_box.setCurrentIndex(i)
             mrow.addWidget(self.model_box, 1)
             cl.addLayout(mrow)
+            brow = QHBoxLayout()
+            self.dl_btn = QPushButton('Download model')
+            self.dl_btn.setToolTip('Download a model from this project\'s GitHub releases (checked against a SHA-256 before it is installed).')
+            self.dl_btn.clicked.connect(self.show_dl_menu)
+            self.upd_btn = QPushButton('Check for updates')
+            self.upd_btn.setToolTip('Looks for newer models and a newer script. Nothing is downloaded or replaced until you ask.')
+            self.upd_btn.clicked.connect(lambda: self.fetch_info(manual=True))
+            brow.addWidget(self.dl_btn); brow.addWidget(self.upd_btn)
+            cl.addLayout(brow)
+            self.upd_note = QLabel('', objectName='Note', wordWrap=True)
+            self.upd_note.setOpenExternalLinks(True)
+            self.upd_note.setTextFormat(Qt.TextFormat.RichText)
+            self.upd_note.hide()
+            cl.addWidget(self.upd_note)
+            self.info = None          # last check_updates() result
+            self.net = None           # running network task
             self.correct = QCheckBox('Correct Only')
             self.correct.setToolTip(STRENGTH_TIP)
             cl.addWidget(self.correct)
@@ -917,10 +1135,109 @@ def launch_gui(siril=None, fake_image=None, smoke=False):
         def model_path(self):
             return self.model_box.currentData()
 
+        # ---- model download / update check (a button press starts every network action, except the manifest lookup at launch)
+        def run_net(self, fn, on_done, busy_text):
+            if self.net is not None and self.net.isRunning():
+                return
+            self.net = Task(fn)
+            self.net.prog.connect(self.net_progress)
+            self.net.done.connect(lambda r: (self.net_idle(), on_done(r)))
+            self.net.failed.connect(lambda m: (self.net_idle(), self.net_failed(m)))
+            for b in (self.dl_btn, self.upd_btn, self.apply_btn):
+                b.setEnabled(False)
+            self.progress.setRange(0, 0); self.progress.show()
+            self.set_status(busy_text)
+            self.net.start()
+
+        def net_progress(self, got, total):
+            if total > 0:
+                self.progress.setRange(0, 1000); self.progress.setValue(int(1000 * got / total))
+                self.set_status(f'Downloading… {got / 1e6:.0f} / {total / 1e6:.0f} MB')
+
+        def net_idle(self):
+            self.progress.hide()
+            self.dl_btn.setEnabled(True); self.upd_btn.setEnabled(True)
+            self.apply_btn.setEnabled(bool(self.model_path()))
+
+        def net_failed(self, msg):
+            self.set_status(msg + ('' if self.model_path() else ' No model is installed yet.'), True)
+
+        def refresh_models(self, select=None):
+            cur = select or self.model_path() or default_model_path()
+            self.model_box.blockSignals(True)
+            self.model_box.clear()
+            for label, path in list_models():
+                self.model_box.addItem(label, path)
+            i = self.model_box.findData(cur) if cur else -1
+            self.model_box.setCurrentIndex(max(i, 0) if self.model_box.count() else -1)
+            self.model_box.blockSignals(False)
+            self.apply_btn.setEnabled(bool(self.model_path()))
+            self.dl_btn.setProperty('attention', not self.model_path())
+            self.dl_btn.setStyleSheet('' if self.model_path() else 'background: #1274d5; color: #ffffff; font-weight: bold;')
+            self.model_changed(remember=bool(select))
+
+        def fetch_info(self, manual=False, then=None):
+            if offline_mode():
+                self.upd_note.setText('Offline mode (UMBRA_DECONV_OFFLINE is set); using the installed models.'); self.upd_note.show()
+                self.net_idle(); return
+            def work(prog):
+                man = fetch_manifest()
+                return check_updates(man)
+            def done(res):
+                self.info = res
+                if manual:
+                    from html import escape
+                    lines = describe_updates(res)
+                    html = '<br>'.join(escape(l).replace(escape(res['script_url'] or ' '), f'<a href="{escape(res["script_url"])}">release page</a>') if res['script_url'] else escape(l) for l in lines)
+                    self.upd_note.setText(html); self.upd_note.show()
+                if then:
+                    then()
+                elif not self.model_path():
+                    d = next((m for m, st in res['models'] if st == 'missing' and m.get('default')), None) or next((m for m, st in res['models'] if st == 'missing'), None)
+                    if d:
+                        self.set_status(f"No model installed. Press Download model to get {d['name']} ({d['size_bytes'] / 1e6:.0f} MB).")
+            def failed(msg):
+                self.info = None
+                if manual or not self.model_path():
+                    self.upd_note.setText(msg); self.upd_note.show()
+                self.set_status(msg if not self.model_path() else self.idle_msg, not self.model_path())
+            self.net = Task(work)
+            self.net.done.connect(lambda r: (self.net_idle(), done(r)))
+            self.net.failed.connect(lambda m: (self.net_idle(), failed(m)))
+            for b in (self.dl_btn, self.upd_btn, self.apply_btn):
+                b.setEnabled(False)
+            self.set_status('Checking the model list…')
+            self.net.start()
+
+        def show_dl_menu(self):
+            if self.info is None:
+                self.fetch_info(manual=False, then=self.show_dl_menu if not offline_mode() else None)
+                return
+            from PyQt6.QtWidgets import QMenu
+            menu = QMenu(self)
+            for m, st in self.info['models']:
+                if st == 'current':
+                    continue
+                tag = 'Update ' if st == 'update' else 'Download '
+                menu.addAction(f"{tag}{m['name']} ({m['size_bytes'] / 1e6:.0f} MB)").triggered.connect(lambda _=False, e=m: self.start_download(e))
+            if menu.isEmpty():
+                self.set_status('All published models are already installed and up to date.')
+                return
+            menu.exec(self.dl_btn.mapToGlobal(self.dl_btn.rect().bottomLeft()))
+
+        def start_download(self, entry):
+            def work(prog):
+                return download_model(entry, MODEL_DIR, progress=prog)
+            def done(path):
+                self.info = None
+                self.refresh_models(select=str(path))
+                self.set_status(f"Installed {entry['name']}. " + self.idle_msg)
+            self.run_net(work, done, f"Downloading {entry['name']}…")
+
         def model_changed(self, *_, remember=True):
             path = self.model_path()
             if not path:
-                self.set_status(f'No model found: put a *.onnx file in {MODEL_DIR}', True)
+                self.set_status(f'No model installed. Press Download model (or put a *.onnx file in {MODEL_DIR}).', True)
                 return
             self.set_status('Loading model…')
             QApplication.processEvents()
@@ -967,7 +1284,7 @@ def launch_gui(siril=None, fake_image=None, smoke=False):
             if self.worker is not None and self.worker.isRunning():
                 return
             if not self.model_path():
-                self.set_status(f'No model found: put a *.onnx file in {MODEL_DIR}', True)
+                self.set_status('No model installed. Press Download model first.', True)
                 return
             sp = self.sharpen.value() if self.star_capable else 0
             hp = self.halo.value() if self.star_capable else 0
@@ -1031,6 +1348,9 @@ def launch_gui(siril=None, fake_image=None, smoke=False):
     win = Window()
     win.show()
     QTimer.singleShot(0, lambda: win.model_changed(remember=False))
+    win.apply_btn.setEnabled(bool(win.model_path()))
+    if not smoke:
+        QTimer.singleShot(200, lambda: win.fetch_info(manual=False))      # manifest lookup only (no download, nothing sent but a generic client name)
     if smoke:
         def poll():
             if win.result is not None:
@@ -1113,8 +1433,30 @@ def main():
     ap.add_argument('--model', help='model file (*.onnx); default: the remembered / first model')
     ap.add_argument('--sharpening', type=float, help='fb models: passes 0..8 in steps of 0.25 (default 3; 2.5 = 2 passes + half pass); ignored for older models')
     ap.add_argument('--protect-stars', action='store_true', help='fine-detail models: star shapes from Umbra Deconvolution 1.0 (~2x slower)')
+    ap.add_argument('--check-updates', action='store_true', help='compare installed models and this script with the published manifest, then exit')
+    ap.add_argument('--download', nargs='?', const='default', metavar='MODEL_ID|all', help='download a published model (default: the default model) into the models folder, then exit')
     ap.add_argument('--ui-test', action='store_true', help='open the window on a fake image, Apply once, exit')
     a = ap.parse_args()
+    if a.check_updates or a.download:
+        try:
+            man = fetch_manifest()
+            res = check_updates(man)
+            if a.check_updates:
+                print('\n'.join(describe_updates(res)))
+            if a.download:
+                want = [e for e, st in res['models'] if st != 'current' and (a.download == 'all' or (a.download == 'default' and e.get('default')) or a.download == e['id'])]
+                if not want:
+                    print('Nothing to download (installed and up to date, or unknown model id).')
+                for e in want:
+                    last = [0]
+                    def pr(g, t):
+                        if g - last[0] >= 20_000_000 or g == t:
+                            last[0] = g; print(f"  {e['name']}: {g / 1e6:.0f} / {t / 1e6:.0f} MB", flush=True)
+                    print('installed', download_model(e, MODEL_DIR, pr))
+            return 0
+        except DownloadError as e:
+            print(f'ERROR: {e}', file=sys.stderr)
+            return 1
     if a.ui_test:
         rng = np.random.default_rng(0)
         fake = (0.02 + 0.003 * rng.standard_normal((3, 128, 128))).astype(np.float32)

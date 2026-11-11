@@ -25,5 +25,9 @@
       "sha256": "f09c793fabce0be34fb23c27b3885e16a1879064af8291a4fdc25ac1f79e91e2",
       "size_bytes": 198635024
     }
-  ]
+  ],
+  "script": {
+    "version": "0.0.14",
+    "url": "https://github.com/Kishanhpatel/umbra-deconvolve/releases/tag/v0.0.14"
+  }
 }
