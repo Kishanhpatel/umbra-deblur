@@ -38,11 +38,16 @@ Models are published as GitHub Release assets and are not stored in this reposit
 
 Providers are tried in this order: CUDA, DirectML (Windows), ROCm (AMD on Linux), Core ML (Mac), then CPU. The status line says which one ran ("Ran on ..."). Set `UMBRA_DECONV_CPU=1` to force the CPU. On first run the script installs `onnxruntime-directml` (Windows), `onnxruntime-gpu` (Linux with an NVIDIA GPU) or plain `onnxruntime` (everything else).
 
-## Install (draft)
+## Install
 
-1. Download `Umbra_Deconvolve.py` into your Siril scripts folder.
-2. Download the model files from the Releases page into an `Umbra Deconvolve` folder next to the script.
-3. In Siril, add the scripts folder under Preferences > Scripts, then run **Umbra Deconvolve**.
+There is no in-script model downloader yet, so models are installed by hand.
+
+1. Download `Umbra_Deconvolve.py` from this repository into your Siril scripts folder.
+2. From the [v0.0.13 release](https://github.com/Kishanhpatel/umbra-deconvolve/releases/tag/v0.0.13), download **both** `.onnx` files (about 199 MB each). Checksums are in `models/models.json`.
+3. Put the two `.onnx` files in a folder named `Umbra Deconvolve` next to the script (for example `Siril Scripts/Umbra Deconvolve/`). You can also point the `UMBRA_DECONV_MODEL_DIR` environment variable at the folder.
+4. In Siril, add the scripts folder under Preferences > Scripts, then run **Umbra Deconvolve**.
+
+**This is a pre-release.** It has been run as a standalone script and window test on one Mac, but not yet inside Siril, and not on Windows or Linux.
 
 ## Layout
 
