@@ -10,6 +10,13 @@ AI deconvolution (sharpening) script for [Siril](https://siril.org), built for S
 2. Download the model listed in [`models/models.json`](models/models.json) from the Releases page. Models are release assets and are not stored in this repository.
 3. In Siril, add the scripts folder under Preferences > Scripts, then run **Umbra Deconvolve**.
 
+## Models
+
+- **Umbra Deconvolution 1.0**: the default.
+- **Umbra Deconvolution 1.1a experimental**: optional, may change.
+
+(Whether both ship in the first release is not decided yet.)
+
 ## Layout
 
 - `Umbra_Deconvolve.py`: the script (placeholder until the ONNX version lands)
