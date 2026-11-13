@@ -28,7 +28,7 @@ Umbra Deblur is an AI deblur (deconvolution) tool for [Siril](https://siril.org)
 It measures the star shape (PSF) of your image, then runs the model for a number of passes to sharpen it. Controls:
 
 - **Aberration Removal Only**: fixes star shapes (aberrations) without sharpening. Switches the Iterations, star and halo controls off.
-- **Iterations** (0 to 8, steps of 0.25, default 3): the number of sharpening passes. Every image looks best at a different number of iterations, but generally more iterations are stronger; try a few settings to find the one that looks best on your image. The star shape is measured again each pass. 2.5 means 2 passes plus a half-strength pass. 0 is the same as Aberration Removal Only. (Older models without this setting show **Strength** 0 to 100% instead.)
+- **Iterations** (0 to 8, steps of 0.25, default 3): the number of sharpening passes. Every image looks best at a different number of iterations, but generally more iterations are stronger; try a few settings to find the one that looks best on your image. Since v0.4.1 each pass takes the step size the models were trained with, so results level off after about 5 iterations. The star shape is measured again each pass. 2.5 means 2 passes plus a half-strength pass. 0 is the same as Aberration Removal Only. (Older models without this setting show **Strength** 0 to 100% instead.)
 - **Protect star shapes (slower)**: only shown for v1.1 (experimental). Stars come from v1.0, which gives the best star shapes, and all other detail from v1.1. About twice as slow.
 - **Automatic PSF** and **PSF Diameter (px)** (1.5 to 10): the star size is measured from the image by default. Switch off to set it by hand. Automatic PSF is greyed out, and you set PSF Diameter by hand, when the image has no stars, because the current models need stars to measure the PSF.
 - **Sharpen Stars** (0 to 100%): shrinks stars toward the sampling limit. Only this slider changes star size. Default 0.
@@ -81,7 +81,7 @@ The old files are byte-for-byte the same models. If you already have them they k
 ## Weaknesses
 
 - Very fine (1 to 4 pixel) detail is the weak spot. It is most visible inside bright cores (the inner M51 bulge, the Centaurus A core), where filaments stay smooth or break into beads.
-- At 8 Iterations faint, smooth nebulosity (for example the dust around the Horsehead) can turn into blobby texture, and some galaxies (M101, NGC 6946, Arp 273) can show mild pits or beading. Back off if you see it.
+- At high Iterations faint, smooth nebulosity (for example the dust around the Horsehead) can turn into blobby texture, and some galaxies can show mild pits or beading. v0.4.1 reduced this a lot; back off if you still see it.
 - v1.1 can leave coma-like tails on bright corner stars unless "Protect star shapes" is on. That costs roughly 1.5 to 2 times the run time.
 - Star peaks can go above 1.0 at high settings, so save results as 32-bit float.
 - Linear data only. Stretched images are not what it was made for.

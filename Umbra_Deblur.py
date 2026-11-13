@@ -9,7 +9,8 @@ Run in Siril (Scripts menu), or standalone:
   python Umbra_Deblur.py --image in.fits --out out.fits [--model PATH.onnx] [--sharpening 0..8] [--strength 0..1] [--stars 0..1] [--halo 0..1] [--correct-only] [--fwhm PX] [--protect-stars]
   python Umbra_Deblur.py --ui-test        (opens the window on a fake image, runs Apply once, exits)
   python Umbra_Deblur.py --check-updates | --download [MODEL_ID|all]"""
-VERSION = '0.4.0'
+VERSION = '0.4.1'
+# 0.4.1: cleaner results at high Iterations: each iteration now takes the same step size the models were trained with, so the dark pits and beading that appeared at 6-8 Iterations are mostly gone (Iterations above about 5 change little now).
 # 0.4.0: edits carry over between tools (Denoise, then Deblur starts from the denoised image); Undo / Redo above the image (Cmd/Ctrl+Z); Undo all fixed (back to the opened image, also in Siril); Apply is a small blue button inside the panel; drop-down menus show the whole list; hold Space anywhere to see the original, [ and ] change the brush size; second panel with Restore (paint back the image from before the tool), Clone (drag the blue source ring, paint to copy, like Umbra Astro Studio) and Eraser brushes; the Sharpening slider is now called Iterations.
 # 0.3.0: new window like Umbra Guided GHS: fixed controls column, zoomable image on the right that shows the original at once; Apply shows the result there, Apply to Siril writes it, Undo all puts back the starting image; Download sits next to the model list, models not installed are listed as (Not Downloaded), and the update check runs at every start (green / yellow note); Correct Only is now Aberration Removal Only; Automatic PSF is greyed out when the image has no stars.
 # 0.2.0: GPU by default also on Linux with NVIDIA (CUDA libraries installed on first run if missing); OpenVINO / MIGraphX used when installed.
@@ -2902,8 +2903,8 @@ def _engine_deblur():
     AUTO_PSF_MAX = 9.0       # larger Automatic PSF readings come from star residues (starless images)
     STARLESS_DENSITY = 15.0  # isolated stars per megapixel below which the image counts as starless
     STARLESS_FWHM = 4.0      # fallback used then
-    SCHED_R = 0.8
-    SCHED_FLOOR = 1.0
+    SCHED_R = 0.65          # 2026-11-13: matches the training rollout step (rel_ratio 0.65); 0.8 left dark pits at 6-8 iterations
+    SCHED_FLOOR = 1.15      # = training nebula floor (neb_floor 1.15)
     CORR_REF = 2.2
     CORR_TRIGGER = 2.8
     CORR_C2R = 1.64
