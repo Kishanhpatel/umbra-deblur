@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 # Umbra Deblur (BETA), Copyright (c) 2026 Kishan Patel. Own code; no code taken from other scripts.
-"""AI deblur (deconvolution) for linear images. Preview or Apply; Apply replaces the image in Siril (Undo available).
-Correct Only fixes star shapes (aberrations) without sharpening. Sharpening sets the number of passes (0-8).
+"""AI deblur (deconvolution) for linear images. Apply shows the result in the window; Apply to Siril replaces the image (Undo available).
+Aberration Removal Only fixes star shapes (aberrations) without sharpening. Sharpening sets the number of passes (0-8).
 Sharpen Stars is the only control that shrinks stars; Halo Reduction is the only one that pulls in star halos.
 Automatic PSF measures the star size from the image; switch it off to set the PSF diameter by hand.
 Run in Siril (Scripts menu), or standalone:
   python Umbra_Deblur.py --image in.fits --out out.fits [--model PATH.onnx] [--sharpening 0..8] [--strength 0..1] [--stars 0..1] [--halo 0..1] [--correct-only] [--fwhm PX] [--protect-stars]
-  python Umbra_Deblur.py --ui-test        (opens the window on a fake image, runs Preview once, exits)
+  python Umbra_Deblur.py --ui-test        (opens the window on a fake image, runs Apply once, exits)
   python Umbra_Deblur.py --check-updates | --download [MODEL_ID|all]"""
-VERSION = '0.2.0'
+VERSION = '0.3.0'
+# 0.3.0: new window like Umbra Guided GHS: fixed controls column, zoomable image on the right that shows the original at once; Apply shows the result there, Apply to Siril writes it, Undo all puts back the starting image; Download sits next to the model list, models not installed are listed as (Not Downloaded), and the update check runs at every start (green / yellow note); Correct Only is now Aberration Removal Only; Automatic PSF is greyed out when the image has no stars.
 # 0.2.0: GPU by default also on Linux with NVIDIA (CUDA libraries installed on first run if missing); OpenVINO / MIGraphX used when installed.
 # 0.1.1: buttons, check boxes, drop-down menus and scroll bars now look the same as in Umbra Astro Studio.
 # 0.1.0: Umbra Deblur 0.1.0 replaces Umbra Deconvolve 0.0.14: new name, models "Umbra Deblur v1.0" / "v1.1 (experimental)" (same files as before; the old
@@ -64,12 +65,13 @@ class ToolSpec:
         self.default_stems = ()
         self.notes = []
         self.linear_only = True
-        self.preview_whole = False       # Gradient: preview runs on the whole image
-        self.reuse_preview = False       # Gradient: Apply with unchanged settings reuses the preview result
+        self.preview_whole = True        # Apply runs on the whole image and shows the result in the pane
+        self.reuse_preview = True        # Apply to Siril with unchanged settings reuses the result shown
         self.alt = None                  # (button text, info key) second preview layer
         self.progress_unit = 'tile'
         self.extras = {}                 # extra model files: kind -> file stem prefix (e.g. {'critic': 'umbra_starless_critic'}); not shown in the model picker
-        self.has_editor = False          # Starless: Preview opens the correction-marks editor
+        self.has_editor = False          # Starless: an Edit marks button opens the correction-marks editor
+        self.inline_preview = True       # every tool: Apply shows the result in the pane, Apply to Siril writes it
         self.__dict__.update(kw)
 
     @property
@@ -167,6 +169,12 @@ def extra_path(spec, kind):
 def list_models(spec):
     items = [(model_label(spec, f.stem), str(f)) for f in _onnx_files(model_dir(spec)[0]) if not is_extra(spec, f)]
     items.sort(key=lambda it: (0 if Path(it[1]).stem in spec.default_stems else 1, it[0]))
+    extra = getattr(spec, 'extra_models', None)              # e.g. Starless: StarNet++ when the user has it installed
+    if callable(extra):
+        try:
+            items += list(extra())
+        except Exception:
+            pass
     return items
 
 
@@ -264,10 +272,15 @@ def make_session_factory(prefix, skip=()):
     GPU providers are tried in order of preference for the platform (CUDA, DirectML, ROCm, MIGraphX, OpenVINO, Core ML); each is checked against the CPU
     provider on one probe feed (outputs must agree to 1e-3 relative) and the first that works is used. Anything missing, failing or
     disagreeing falls through to the next, and finally to the CPU.  <PREFIX>CPU=1 forces the CPU."""
-    def factory(model_path, feed):
+    def factory(model_path, feed, dims=None):
         import onnxruntime as ort
         path = str(model_path)
-        so = ort.SessionOptions(); so.log_severity_level = 3
+        def new_opts():
+            o = ort.SessionOptions(); o.log_severity_level = 3
+            for k, v in (dims or {}).items():          # pin free dimensions (Core ML compiles a fixed shape fast, a free one very slowly)
+                o.add_free_dimension_override_by_name(k, int(v))
+            return o
+        so = new_opts()
         holder = []
         def mk_cpu():
             if not holder:
@@ -293,7 +306,7 @@ def make_session_factory(prefix, skip=()):
                 if name not in avail or lab in skip:
                     continue
                 try:
-                    so2 = ort.SessionOptions(); so2.log_severity_level = 3
+                    so2 = new_opts()
                     if dml:                                    # DirectML requirements
                         so2.enable_mem_pattern = False; so2.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
                     g = ort.InferenceSession(path, so2, providers=[(name, opts), 'CPUExecutionProvider'])
@@ -329,8 +342,9 @@ def get_engine(spec, model_path):
     p = Path(str(model_path or ''))
     if not p.is_file():
         raise FileNotFoundError(f'Model not found: {p}')
-    kw = {'critic_factory': make_session_factory(spec.prefix, skip=('Core ML',))} if spec.extras else {}   # the critic has free tile shapes: Core ML is slow there, the CPU takes about 1 s per 1024 px tile
-    eng = ENGINES[spec.key].Engine(str(p), make_session_factory(spec.prefix), **kw)
+    eng = ENGINES[spec.key].Engine(str(p), make_session_factory(spec.prefix))
+    if callable(getattr(spec, 'configure_engine', None)):
+        spec.configure_engine(eng)
     _ENGINE_CACHE[spec.key] = (str(p), eng)
     return eng
 
@@ -567,8 +581,8 @@ def missing_model_message(spec, res=None):
     if res:
         d = next((m for m, st in res['models'] if st == 'missing' and m.get('default') and not m.get('kind')), None) or next((m for m, st in res['models'] if st == 'missing' and not m.get('kind')), None)
         if d:
-            return f"No model installed. Press Download model to get {d['name']} ({d['size_bytes'] / 1e6:.0f} MB)."
-    return f'No model installed. Press Download model, or put a .onnx file in {model_dir(spec)[0]}.'
+            return f"No model installed. Select {d['name']} in the dropdown and click Download ({d['size_bytes'] / 1e6:.0f} MB)."
+    return f'No model installed. Select a model in the dropdown and click Download, or put a .onnx file in {model_dir(spec)[0]}.'
 
 
 # ----------------------------------------------------------------------------------------------- Siril I/O
@@ -647,6 +661,27 @@ def unique_path(p):
         if not q.exists():
             return q
     raise FileExistsError(p)
+
+
+def prefixed_path(siril, prefix):
+    """<prefix><image file name> next to the image Siril has loaded, e.g. starmask_M42.fits (FITS extension kept, others -> .fit;
+    never overwrites: _1, _2 ... when it exists).  Falls back to Siril's working folder."""
+    name = None
+    try:
+        name = siril.get_image_filename()
+    except Exception:
+        pass
+    if name and Path(name).parent.is_dir() and str(Path(name).parent) != '.':
+        n = Path(name)
+        stem = n.name[:-3] if n.name.lower().endswith('.gz') else n.name
+        ext = Path(stem).suffix if Path(stem).suffix.lower() in ('.fit', '.fits', '.fts') else '.fit'
+        return unique_path(n.with_name(prefix + Path(stem).stem + ext))
+    wd = None
+    try:
+        wd = siril.get_siril_wd()
+    except Exception:
+        pass
+    return unique_path(Path(wd or Path.home()) / f'{prefix}image.fit')
 
 
 def side_path(siril, suffix):
@@ -784,6 +819,7 @@ QPushButton:checked { background: #1474d5; border-color: #358eef; }
 QPushButton:disabled { color: #777777; border-color: #444444; }
 QPushButton#Apply { background: #1274d5; color: #ffffff; font-weight: bold; border-color: #338be7; }
 QPushButton#Apply:disabled { background: #354656; color: #808890; border-color: #43505c; }
+QPushButton#ZoomButton { padding: 3px 10px; }
 QScrollArea { border: none; background: #242424; }
 QScrollBar:vertical { background: #242424; width: 8px; margin: 0; }
 QScrollBar::handle:vertical { background: #555555; border-radius: 4px; min-height: 24px; }
@@ -800,8 +836,10 @@ QProgressBar { border: 1px solid #444444; border-radius: 3px; max-height: 6px; }
 QProgressBar::chunk { background: #1474d5; }
 """
 
+PANE_SIDE = 2400          # longest side of the images shown in the zoomable pane
 IDLE_SIRIL = 'Set the controls, then press Preview or Apply. Apply replaces the image in Siril (Undo available).'
 IDLE_TEST = 'Test mode (no Siril).'
+IDLE_INLINE = 'Press Apply to see the result on the right, then Apply to Siril to write it (Undo available).'
 _QT = {}
 
 
@@ -816,7 +854,9 @@ def _qt():
 
     from PyQt6.QtCore import QPointF, QRectF
     from PyQt6.QtGui import QPainter, QPen, QColor
-    from PyQt6.QtWidgets import QListView, QFrame
+    from PyQt6.QtWidgets import QListView, QFrame, QGraphicsView, QGraphicsScene, QScrollArea
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtGui import QCursor, QPainterPath
 
     class ModernComboBox(QComboBox):
         """Rounded drop-down, drawn the same on every platform (same look as Umbra Astro Studio)."""
@@ -904,73 +944,318 @@ def _qt():
         h, w = rgb.shape[:2]
         return QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
 
-    class PreviewWindow(QWidget):
-        """Umbra <Tool> Preview (BETA): before/after with the same linked auto-stretch; hold Space (or the button) for the original."""
-        def __init__(self, spec):
+    class ZoomView(QGraphicsView):
+        """The image area (like Umbra Guided GHS): fits the window until you zoom; wheel / pinch zooms around the mouse, drag pans,
+        double-click fits again.  Swapping before / after keeps the zoom and position."""
+        MAX_ZOOM = 8.0
+
+        def __init__(self, pane):
             super().__init__()
-            self.spec = spec
-            self.setWindowTitle(f'{spec.name} Preview (BETA)')
-            self.setStyleSheet(STYLE)
-            self.resize(820, 760)
-            self.layers = {}
+            self.pane = pane
+            self.setScene(QGraphicsScene(self))
+            self.item = self.scene().addPixmap(QPixmap())
+            self.item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+            self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+            self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+            self.setFrameShape(QFrame.Shape.NoFrame)
+            self.setBackgroundBrush(QColor('#191919'))
+            self.setStyleSheet('QGraphicsView { background: #191919; border: 1px solid #484848; border-radius: 7px; }')
+            self.setMinimumSize(320, 240)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self.setToolTip('Scroll or pinch to zoom, drag to pan, double-click to fit. Hold Space (or Show original) for the original.')
+            self.fitted = True
+            self.placeholder = ''
+            # brushes (Starless correction marks): the page that owns the strokes sets them up with set_brush()
+            self.overlay = self.scene().addPixmap(QPixmap())
+            self.overlay.setZValue(1)
+            self.tool = 'navigate'                  # navigate | remove | keep | erase
+            self.strokes = None                     # list owned by the tool page, or None = no brushes
+            self.brush = dict(size=0.03, opacity=1.0, softness=0.35)
+            self.colors = {'remove': (255, 60, 60), 'keep': (60, 220, 90), 'erase': (235, 235, 235)}
+            self.on_stroke = None
+            self.draft = None
+            self.cursor_pos = None
+            self.mpan = None
+            self.max_strokes, self.max_points = 600, 4096
+            self.setMouseTracking(True); self.viewport().setMouseTracking(True)
+
+        # ---- brushes
+        def set_brush(self, strokes=None, on_stroke=None):
+            """strokes: the page's stroke list (None switches the brushes off and hides the marks)."""
+            self.strokes, self.on_stroke = strokes, on_stroke
+            if strokes is None:
+                self.set_tool('navigate')
+                self.overlay.setPixmap(QPixmap())
+
+        def set_tool(self, tool):
+            self.tool = tool if self.strokes is not None else 'navigate'
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag if self.tool == 'navigate' else QGraphicsView.DragMode.NoDrag)
+            self.viewport().setCursor(QCursor(Qt.CursorShape.OpenHandCursor if self.tool == 'navigate' else Qt.CursorShape.CrossCursor))
+            self.viewport().update()
+
+        def set_overlay(self, pm):
+            self.overlay.setPixmap(pm if pm is not None else QPixmap())
+
+        def image_shape(self):
+            pm = self.item.pixmap()
+            return (pm.height(), pm.width())
+
+        def _norm(self, pos):
+            h, w = self.image_shape()
+            return [float(min(max((pos.x() - 0.5) / max(w - 1, 1), 0), 1)), float(min(max((pos.y() - 0.5) / max(h - 1, 1), 0), 1))]
+
+        def _scene(self, p):
+            h, w = self.image_shape()
+            return QPointF(p[0] * max(w - 1, 1) + 0.5, p[1] * max(h - 1, 1) + 0.5)
+
+        def _inside(self, pos):
+            return not self.item.pixmap().isNull() and QRectF(self.item.pixmap().rect()).contains(pos)
+
+        def mousePressEvent(self, e):
+            if e.button() == Qt.MouseButton.MiddleButton:
+                self.mpan = e.position(); e.accept(); return
+            if self.tool != 'navigate' and self.strokes is not None and e.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+                pos = self.mapToScene(e.position().toPoint())
+                if self._inside(pos) and len(self.strokes) < self.max_strokes:
+                    erase = self.tool == 'erase' or e.button() == Qt.MouseButton.RightButton
+                    self.draft = dict(layer='both' if erase else self.tool, erase=bool(erase), size=float(self.brush['size']),
+                                      softness=float(self.brush['softness']), opacity=float(self.brush['opacity']), points=[self._norm(pos)])
+                    self.strokes.append(self.draft)
+                    self.cursor_pos = pos
+                    self.viewport().update()
+                e.accept(); return
+            super().mousePressEvent(e)
+
+        def mouseMoveEvent(self, e):
+            if self.mpan is not None:
+                d = e.position() - self.mpan; self.mpan = e.position()
+                self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(d.x()))
+                self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(d.y()))
+                e.accept(); return
+            pos = self.mapToScene(e.position().toPoint())
+            self.cursor_pos = pos if self._inside(pos) else None
+            if self.draft is not None:
+                if self._inside(pos) and len(self.draft['points']) < self.max_points:
+                    last = self._scene(self.draft['points'][-1])
+                    if abs(pos.x() - last.x()) + abs(pos.y() - last.y()) >= 1.0:
+                        self.draft['points'].append([round(v, 7) for v in self._norm(pos)])
+                self.viewport().update(); e.accept(); return
+            if self.tool != 'navigate':
+                self.viewport().update(); e.accept(); return
+            super().mouseMoveEvent(e)
+
+        def mouseReleaseEvent(self, e):
+            if e.button() == Qt.MouseButton.MiddleButton:
+                self.mpan = None; e.accept(); return
+            if self.draft is not None:
+                self.draft = None
+                self.viewport().update()
+                if self.on_stroke is not None:
+                    self.on_stroke()
+                e.accept(); return
+            super().mouseReleaseEvent(e)
+
+        def leaveEvent(self, e):
+            self.cursor_pos = None
+            self.viewport().update()
+            super().leaveEvent(e)
+
+        def set_pixmap(self, pm, keep_view=True):
+            same = (not self.item.pixmap().isNull()) and self.item.pixmap().size() == pm.size()
+            self.item.setPixmap(pm)
+            self.scene().setSceneRect(QRectF(pm.rect()))
+            if not (keep_view and same) or self.fitted:
+                self.fit()
+            self.viewport().update()
+
+        def clear(self, text=''):
+            self.item.setPixmap(QPixmap())
+            self.placeholder = text
+            self.viewport().update()
+
+        def fit(self):
+            pm = self.item.pixmap()
+            self.resetTransform()
+            if not pm.isNull():
+                self.fitInView(self.item, Qt.AspectRatioMode.KeepAspectRatio)
+            self.fitted = True
+
+        def zoom_by(self, factor):
+            pm = self.item.pixmap()
+            if pm.isNull():
+                return
+            vp = self.viewport()
+            current = max(abs(self.transform().m11()), 1e-9)
+            fitted = min(max(1, vp.width() - 4) / max(pm.width(), 1), max(1, vp.height() - 4) / max(pm.height(), 1))
+            floor, ceiling = min(fitted, 1.0), max(self.MAX_ZOOM / max(self.devicePixelRatioF(), 1e-6), fitted)
+            factor = min(max(factor, floor / current), ceiling / current)
+            self.scale(factor, factor)
+            self.fitted = abs(self.transform().m11() - fitted) < 1e-3 * fitted
+
+        def wheelEvent(self, e):
+            if self.draft is not None:
+                e.accept(); return
+            delta = e.angleDelta().y() or e.pixelDelta().y()
+            if delta:
+                self.zoom_by(1.2 if delta > 0 else 1 / 1.2)
+            e.accept()
+
+        def viewportEvent(self, e):
+            if e.type() == QEvent.Type.NativeGesture and e.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                self.zoom_by(math.exp(float(e.value())))
+                return True
+            return super().viewportEvent(e)
+
+        def mouseDoubleClickEvent(self, e):
+            if self.tool == 'navigate':
+                self.fit()
+            e.accept()
+
+        def resizeEvent(self, e):
+            super().resizeEvent(e)
+            if self.fitted:
+                self.fit()
+
+        def keyPressEvent(self, e):
+            self.pane.keyPressEvent(e)
+
+        def keyReleaseEvent(self, e):
+            self.pane.keyReleaseEvent(e)
+
+        def drawForeground(self, p, rect):
+            if self.item.pixmap().isNull() and self.placeholder:
+                p.save(); p.resetTransform()
+                p.setPen(QColor('#9a9a9a'))
+                p.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, self.placeholder)
+                p.restore()
+            h, w = self.image_shape()
+            if self.draft is not None:          # live trail while the mouse is down (the marks image is rebuilt on release)
+                pts = [self._scene(q) for q in self.draft['points']]
+                pen = QPen(QColor(*self.colors['erase' if self.draft['erase'] else self.draft['layer']], int(60 + 80 * self.draft['opacity'])))
+                pen.setWidthF(max(self.draft['size'] * min(h, w), 1.0))
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                p.save(); p.setPen(pen)
+                if len(pts) == 1:
+                    p.drawPoint(pts[0])
+                else:
+                    path = QPainterPath(pts[0])
+                    for q in pts[1:]:
+                        path.lineTo(q)
+                    p.drawPath(path)
+                p.restore()
+            if self.tool != 'navigate' and self.cursor_pos is not None:
+                rad = max(self.brush['size'] * min(h, w) / 2, 0.5)
+                p.save(); p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                pen = QPen(QColor('#111111'), 3); pen.setCosmetic(True); p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(self.cursor_pos, rad, rad)
+                pen = QPen(QColor(*self.colors[self.tool]), 1); pen.setCosmetic(True); p.setPen(pen)
+                p.drawEllipse(self.cursor_pos, rad, rad)
+                p.restore()
+
+    class PreviewWindow(QWidget):
+        """The image pane on the right of the window (shared by all tools): the original before a run, then before / after with the
+        same linked auto-stretch; hold Space (or Show original) for the original; zoom / pan like Umbra Guided GHS."""
+        def __init__(self, spec=None, embedded=True):
+            super().__init__()
+            self.spec, self.embedded = spec, True
             self.pix = {}
+            self.size_note = ''
+            self.titles = {'before': 'Original', 'after': 'Result', 'alt': 'Gradient model'}
             lay = QVBoxLayout(self)
-            lay.setContentsMargins(8, 8, 8, 8)
-            self.view = QLabel()
-            self.view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.view.setMinimumSize(200, 200)
-            self.view.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-            lay.addWidget(self.view, 1)
+            lay.setContentsMargins(0, 12, 14, 12)
+            lay.setSpacing(6)
             row = QHBoxLayout()
-            self.caption = QLabel('', objectName='Caption', wordWrap=True)
-            row.addWidget(self.caption, 1)
+            row.setSpacing(6)
+            self.caption = QLabel('', objectName='Badge')
+            row.addWidget(self.caption)
+            row.addStretch(1)
+            self.alt_btn = QPushButton('Show gradient model')
+            self.alt_btn.setCheckable(True)
+            self.alt_btn.setToolTip('Shows the gradient model: the background that is subtracted. Press again to go back to the result.')
+            self.alt_btn.toggled.connect(lambda c: (self.hold(False) if c else None, self.refresh()))
+            self.alt_btn.hide()
+            row.addWidget(self.alt_btn)
+            self.fit_btn = QPushButton('Fit', objectName='ZoomButton')
+            self.fit_btn.setToolTip('Fit the whole image in the window (or double-click the image).')
+            self.fit_btn.clicked.connect(lambda: self.view.fit())
+            row.addWidget(self.fit_btn)
             self.orig_btn = QPushButton('Show original')
             self.show_orig = False
             self.orig_btn.setToolTip('Hold the button (or the Space key) to see the original; release to go back to the result.')
             self.orig_btn.pressed.connect(lambda: self.hold(True))
             self.orig_btn.released.connect(lambda: self.hold(False))
+            self.orig_btn.setEnabled(False)
             row.addWidget(self.orig_btn)
-            self.alt_btn = None
-            if spec.alt:
-                self.alt_btn = QPushButton(spec.alt[0])
-                self.alt_btn.setCheckable(True)
-                self.alt_btn.toggled.connect(lambda c: (self.hold(False) if c else None, self.refresh()))
-                row.addWidget(self.alt_btn)
             lay.addLayout(row)
+            self.view = ZoomView(self)
+            lay.addWidget(self.view, 1)
             self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+        def set_alt(self, label):
+            """label: text of the alternative-view button (e.g. 'Show gradient model'), or None for tools without one."""
+            self.alt_label = label
+            if label:
+                self.alt_btn.setText(label)
+                self.titles['alt'] = label[5:].capitalize() if label.startswith('Show ') else label
+            if not label:
+                self.alt_btn.setChecked(False)
+                self.alt_btn.hide()
+
         def hold(self, flag):
-            self.show_orig = bool(flag)
+            self.show_orig = bool(flag) and self.orig_btn.isEnabled()
             self.refresh()
+
+        def show_state(self, state):
+            """state: dict saved by a tool page (see snapshot), or None for an empty pane."""
+            if not state:
+                self.pix = {}
+                self.orig_btn.setEnabled(False)
+                self.alt_btn.setChecked(False); self.alt_btn.hide()
+                self.caption.setText('')
+                self.view.clear('No image loaded in Siril.')
+                return
+            self.pix = dict(state['pix'])
+            self.size_note = state.get('note', '')
+            self.orig_btn.setEnabled(state['result'])
+            has_alt = 'alt' in self.pix and bool(getattr(self, 'alt_label', None))
+            self.alt_btn.setVisible(has_alt)
+            if not has_alt:
+                self.alt_btn.setChecked(False)
+            self.show_orig = False
+            self.caption.setText(state['caption'])
+            self.refresh(keep_view=state.get('keep_view', True))
 
         def show_result(self, before, after, alt, caption):
             """before / after / alt: (H,W,3) uint8 (alt may be None)."""
-            self.pix = {'before': QPixmap.fromImage(qimage(before)), 'after': QPixmap.fromImage(qimage(after))}
+            st = dict(pix={'before': QPixmap.fromImage(qimage(before)), 'after': QPixmap.fromImage(qimage(after))}, result=True, caption=caption,
+                      note=self.size_note, keep_view=False)
             if alt is not None:
-                self.pix['alt'] = QPixmap.fromImage(qimage(alt))
-            if self.alt_btn is not None:
-                self.alt_btn.setVisible(alt is not None)
-                if alt is None:
-                    self.alt_btn.setChecked(False)
-            self.show_orig = False
-            self.caption.setText(caption)
-            self.refresh()
-            self.show(); self.raise_()
+                st['pix']['alt'] = QPixmap.fromImage(qimage(alt))
+            self.show_state(st)
+            return st
+
+        def show_original(self, before, caption):
+            """Before any run: the original only."""
+            p = QPixmap.fromImage(qimage(before))
+            st = dict(pix={'before': p, 'after': p}, result=False, caption=caption, note='', keep_view=False)
+            self.show_state(st)
+            return st
 
         def current_key(self):
-            if self.alt_btn is not None and self.alt_btn.isChecked() and 'alt' in self.pix:
+            if self.alt_btn.isVisible() and self.alt_btn.isChecked() and 'alt' in self.pix:
                 return 'alt'
             return 'before' if self.show_orig else 'after'
 
-        def refresh(self):
+        def refresh(self, keep_view=True):
+            if len(self.pix) > 1 and self.orig_btn.isEnabled():
+                self.caption.setText(self.titles[self.current_key()] + self.size_note)
             p = self.pix.get(self.current_key())
             if p is None or p.isNull():
                 return
-            self.view.setPixmap(p.scaled(self.view.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-
-        def resizeEvent(self, e):
-            super().resizeEvent(e)
-            self.refresh()
+            self.view.set_pixmap(p, keep_view=keep_view)
 
         def keyPressEvent(self, e):
             if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat():
@@ -1051,7 +1336,7 @@ def _qt():
 
     class ToolView(QWidget):
         """One tool: title, model card + tool controls, Preview / Apply, progress, status, Close. Used alone or as a page of the combined window."""
-        def __init__(self, spec, siril=None, fake_image=None, prefs=None, upd=None, show_title=True, smoke=False):
+        def __init__(self, spec, siril=None, fake_image=None, prefs=None, upd=None, show_title=True, smoke=False, pane=None):
             super().__init__()
             self.spec, self.siril, self.fake, self.prefs, self.smoke = spec, siril, fake_image, prefs, smoke
             self.upd = upd or updspec_for(spec)
@@ -1063,8 +1348,14 @@ def _qt():
             self.result = None
             self.last_error = None
             self.busy = False
+            if siril is not None and callable(getattr(spec, 'on_siril', None)):
+                try:
+                    spec.on_siril(siril)
+                except Exception:
+                    pass
             saved_model, saved_settings = (prefs.load(spec.key) if prefs else (None, {}))
             self.saved_model = saved_model
+            self.left = self                          # the controls column; the image pane on the right belongs to the window
             lay = QVBoxLayout(self)
             lay.setContentsMargins(14, 12, 14, 12)
             lay.setSpacing(8)
@@ -1082,19 +1373,13 @@ def _qt():
             mrow.addWidget(QLabel('Model'))
             self.model_box = ModernComboBox()
             mrow.addWidget(self.model_box, 1)
+            self.dl_btn = QPushButton('Download')        # downloads (or updates) the model selected on the left
+            self.dl_btn.setMinimumHeight(28)
+            self.dl_btn.setToolTip("Download the selected model from this project's GitHub releases (checked against a SHA-256 before it is installed).")
+            self.dl_btn.clicked.connect(self.download_clicked)
+            mrow.addWidget(self.dl_btn)
             cl.addLayout(mrow)
-            brow = QHBoxLayout()
-            self.dl_btn = QPushButton('Download model')
-            self.dl_btn.setMinimumHeight(26)
-            self.dl_btn.setToolTip("Download a model from this project's GitHub releases (checked against a SHA-256 before it is installed).")
-            self.dl_btn.clicked.connect(self.show_dl_menu)
-            self.upd_btn = QPushButton('Check for updates')
-            self.upd_btn.setMinimumHeight(26)
-            self.upd_btn.setToolTip('Looks for newer models and a newer script. Nothing is downloaded or replaced until you ask.')
-            self.upd_btn.clicked.connect(lambda: self.fetch_info(manual=True))
-            brow.addWidget(self.dl_btn); brow.addWidget(self.upd_btn)
-            cl.addLayout(brow)
-            self.upd_note = QLabel('', objectName='Note', wordWrap=True)
+            self.upd_note = QLabel('', objectName='Note', wordWrap=True)   # result of the update check made at every start
             self.upd_note.setOpenExternalLinks(True)
             self.upd_note.setTextFormat(Qt.TextFormat.RichText)
             self.upd_note.hide()
@@ -1110,7 +1395,20 @@ def _qt():
             self.preview_btn.clicked.connect(lambda: self.start('preview'))
             self.apply_btn = QPushButton('Apply', objectName='Apply')
             self.apply_btn.clicked.connect(lambda: self.start('apply'))
-            brow2.addWidget(self.preview_btn); brow2.addWidget(self.apply_btn)
+            if spec.inline_preview:                   # Apply shows the result in the window; Apply to Siril (beside Close) writes it
+                self.preview_btn.setText('Apply')
+                self.preview_btn.setToolTip('Runs on the whole image and shows the result on the right. The image in Siril is not changed.')
+                self.apply_btn.setText('Apply to Siril')
+                self.apply_btn.setToolTip('Writes the result to the image in Siril (Undo available). Reuses the result shown on the right when nothing has changed.')
+                brow2.addWidget(self.preview_btn)
+            else:
+                brow2.addWidget(self.preview_btn); brow2.addWidget(self.apply_btn)
+            self.edit_btn = None
+            if spec.has_editor:                       # Starless: Keep / Remove brushes in their own window
+                self.edit_btn = QPushButton('Edit marks')
+                self.edit_btn.setToolTip('Opens the editor for correction marks (Remove / Keep brushes) on the whole image.')
+                self.edit_btn.clicked.connect(lambda: self.start('edit'))
+                brow2.addWidget(self.edit_btn)
             lay.addLayout(brow2)
             prow = QHBoxLayout()
             self.progress = QProgressBar()
@@ -1125,10 +1423,40 @@ def _qt():
             lay.addWidget(self.status)
             close = QPushButton('Close')
             close.clicked.connect(lambda: self.window().close())
-            lay.addWidget(close)
+            self.undo_btn = QPushButton('Undo all')
+            self.undo_btn.setToolTip('Puts back the image as it was when this window opened (Siril Undo still works afterwards).')
+            self.undo_btn.clicked.connect(self.undo_all)
+            self.undo_btn.setEnabled(False)
+            if spec.inline_preview:
+                crow = QHBoxLayout()
+                crow.addWidget(close); crow.addWidget(self.undo_btn); crow.addWidget(self.apply_btn)
+                lay.addLayout(crow)
+            else:
+                lay.addWidget(close)
+            self.idle_msg = (IDLE_INLINE if siril is not None else IDLE_TEST) if spec.inline_preview else self.idle_msg
+            self.status.setText(self.idle_msg)
             self.model_box.currentIndexChanged.connect(lambda *_: self.model_changed())
             self.folder_note = None
+            lay.addStretch(1)
+            self.preview = pane                       # shared image pane (MainWindow)
+            self.pane_state = None                    # what this page last showed in the pane: (image identity, state)
             self.refresh_models()
+
+        def activate(self):
+            """This page became the current one: show its last result in the pane if it belongs to the current image, else the original."""
+            w = self.window()
+            if self.preview is None:
+                return
+            self.preview.set_alt(self.spec.alt[0] if self.spec.alt else None)
+            hook = getattr(self.panel, 'pane_activated', None)
+            if hook is not None:
+                hook(self.preview)
+            else:
+                self.preview.view.set_brush(None)
+            if self.pane_state is not None and self.pane_state[0] == getattr(w, 'orig_identity', None):
+                self.preview.show_state(dict(self.pane_state[1], keep_view=True))
+            else:
+                getattr(w, 'show_original', lambda: None)()
 
         # ---- status
         def set_status(self, msg, error=False):
@@ -1138,7 +1466,44 @@ def _qt():
                 QTimer.singleShot(0, self.window().adjustSize)
 
         def model_path(self):
-            return self.model_box.currentData()
+            d = self.model_box.currentData()
+            return d if isinstance(d, str) else None      # a '(Not Downloaded)' entry holds its manifest entry instead of a path
+
+        def selected_entry(self):
+            """(manifest entry, state) for the selected dropdown item, state 'missing' / 'update' / 'current', or (None, None)."""
+            d = self.model_box.currentData()
+            if isinstance(d, dict):
+                return d, 'missing'
+            if isinstance(d, str) and self.info:
+                for m, st in self.info['models']:
+                    if not m.get('kind') and Path(d).name == m['file'] and Path(d).parent == Path(download_dir(self.spec)):
+                        return m, st
+            return None, None
+
+        def other_downloads(self):
+            """Manifest items other than the selected model that can be installed or updated (e.g. the Auto-keep model)."""
+            if not self.info:
+                return []
+            sel = self.selected_entry()[0]
+            offer = getattr(self.spec, 'offer_extras', True)
+            return [(m, st) for m, st in self.info['models'] if st != 'current' and m is not sel and ((m.get('kind') and offer) or (st == 'update' and not m.get('kind')))]
+
+        def update_dl_button(self, busy=None):
+            busy = self.busy if busy is None else busy
+            e, st = self.selected_entry()
+            if st == 'missing':
+                self.dl_btn.setText('Download'); self.dl_btn.setEnabled(not busy)
+                self.dl_btn.setToolTip(f"Download {e['name']} ({e['size_bytes'] / 1e6:.0f} MB). Checked against a SHA-256 before it is installed.")
+            elif st == 'update':
+                self.dl_btn.setText('Update'); self.dl_btn.setEnabled(not busy)
+                self.dl_btn.setToolTip(f"Download the published version of {e['name']} ({e['size_bytes'] / 1e6:.0f} MB).")
+            else:
+                more = self.other_downloads()
+                self.dl_btn.setText('Download'); self.dl_btn.setEnabled(bool(more) and not busy)
+                self.dl_btn.setToolTip('Other files to download: ' + ', '.join(m['name'] for m, _ in more) if more
+                                       else 'The selected model is installed.')
+            hot = st in ('missing', 'update') or not self.model_box.count()
+            self.dl_btn.setStyleSheet('background: #1274d5; color: #ffffff; font-weight: bold;' if hot and not busy else '')
 
         def save_prefs(self):
             if self.prefs:
@@ -1148,7 +1513,11 @@ def _qt():
             self.busy = flag
             has = bool(self.model_path())
             self.preview_btn.setEnabled(not flag and has); self.apply_btn.setEnabled(not flag and has)
-            self.dl_btn.setEnabled(not flag); self.upd_btn.setEnabled(not flag)
+            self.update_dl_button(busy=flag)
+            if getattr(self, 'edit_btn', None) is not None:
+                self.edit_btn.setEnabled(not flag and has)
+            if getattr(self, 'undo_btn', None) is not None:
+                self.undo_btn.setEnabled(not flag and bool(getattr(self.window(), 'applied', False)))
             self.model_box.setEnabled(not flag)
             self.progress.setVisible(flag); self.cancel_btn.setVisible(flag and not net)
             if flag:
@@ -1167,12 +1536,18 @@ def _qt():
             if i < 0 and cur and Path(cur).is_file():
                 self.model_box.addItem(model_label(sp, Path(cur).stem), cur)
                 i = self.model_box.count() - 1
+            n_installed = self.model_box.count()
+            for m, st in (self.info or {}).get('models', []):    # published models not installed yet (the label loses the tag once installed)
+                if st == 'missing' and not m.get('kind'):
+                    self.model_box.addItem(f"{model_label(sp, Path(m['file']).stem)} (Not Downloaded)", m)
+                    if i < 0 and not n_installed and m.get('default'):
+                        i = self.model_box.count() - 1
             if self.model_box.count():
                 self.model_box.setCurrentIndex(max(i, 0))
             self.model_box.blockSignals(False)
             has = bool(self.model_path())
             self.preview_btn.setEnabled(has and not self.busy); self.apply_btn.setEnabled(has and not self.busy)
-            self.dl_btn.setStyleSheet('' if has else 'background: #1274d5; color: #ffffff; font-weight: bold;')
+            self.update_dl_button()
             d, fb = model_dir(sp)
             if fb and self.folder_note is None:
                 self.folder_note = f"Using models from the old '{sp.fallback_folder}' folder."
@@ -1180,9 +1555,16 @@ def _qt():
 
         def model_changed(self, *_, remember=False):
             path = self.model_path()
+            self.update_dl_button()
+            has = bool(path)
+            self.preview_btn.setEnabled(has and not self.busy); self.apply_btn.setEnabled(has and not self.busy)
             if not path:
                 self.panel.model_changed(None)
-                self.set_status(missing_model_message(self.spec, self.info))
+                e, st = self.selected_entry()
+                if st == 'missing':
+                    self.set_status(f"{e['name']} is not downloaded yet. Click Download to install it ({e['size_bytes'] / 1e6:.0f} MB).")
+                else:
+                    self.set_status(missing_model_message(self.spec, self.info))
                 return
             self.panel.model_changed(path)
             if remember:
@@ -1221,20 +1603,15 @@ def _qt():
                 return check_updates(fetch_manifest(self.upd, use_cache=not manual), sp)
             def done(res):
                 self.info = res
-                if manual:
-                    from html import escape
-                    lines = describe_updates(res, sp)
-                    url = res['script_url']
-                    html = '<br>'.join(escape(l).replace(escape(url), f'<a href="{escape(url)}">release page</a>') if url else escape(l) for l in lines)
-                    self.upd_note.setText(html); self.upd_note.show()
+                self.show_update_note(res)
+                keep = self.model_box.currentData()
+                self.refresh_models(select=keep if isinstance(keep, str) else None)
                 if then:
                     then()
-                elif not self.model_path():
-                    self.set_status(missing_model_message(sp, res))
             def failed(msg):
                 self.info = None
-                if manual or not self.model_path():
-                    self.upd_note.setText(msg); self.upd_note.show()
+                self.upd_note.setStyleSheet('')
+                self.upd_note.setText(msg); self.upd_note.show()
                 self.set_status(msg if not self.model_path() else self.idle_msg, not self.model_path())
             self.net = Task(work)
             self.net.done.connect(lambda r: (self.set_busy(False), done(r)))
@@ -1243,32 +1620,57 @@ def _qt():
             self.set_status('Checking the model list…')
             self.net.start()
 
-        def show_dl_menu(self):
-            if self.info is None:
-                if offline_mode(self.spec):
-                    self.set_status(f'Offline mode ({self.spec.prefix}OFFLINE is set). Put a .onnx file in {download_dir(self.spec)}.')
-                else:
-                    self.fetch_info(manual=False, then=self.show_dl_menu)
+        def show_update_note(self, res):
+            """Green when the script and this tool's models are up to date, yellow when something new is available."""
+            from html import escape
+            lines = []
+            if res['script_newer']:
+                url = res['script_url']
+                lines.append(f'There is an update to this script available ({escape(res["script_version"])}, you have {VERSION}).'
+                             + (f' <a href="{escape(url)}" style="color: #e8c547;">Release page</a>' if url else ''))
+            if any(st == 'missing' and not m.get('kind') for m, st in res['models']):
+                lines.append('There is a new model available for this tool, select the model in the dropdown and click Download to install.')
+            if any(st == 'update' and not m.get('kind') for m, st in res['models']):
+                lines.append('An update is available for a model you have: select it in the dropdown and click Update.')
+            if lines:
+                self.upd_note.setStyleSheet('color: #e8c547;')
+                self.upd_note.setText('<br>'.join(lines))
+            else:
+                self.upd_note.setStyleSheet('color: #5cc96b;')
+                self.upd_note.setText('The models for this tool are up to date.')
+            self.upd_note.show()
+
+        def download_clicked(self):
+            e, st = self.selected_entry()
+            if st in ('missing', 'update'):
+                self.start_download(e)
+                return
+            more = self.other_downloads()
+            if not more:
+                self.update_dl_button()
+                return
+            if len(more) == 1:
+                self.start_download(more[0][0])
                 return
             menu = QMenu(self)
-            for m, st in self.info['models']:
-                if st == 'current':
-                    continue
-                tag = 'Update ' if st == 'update' else 'Download '
+            for m, st2 in more:
+                tag = 'Update ' if st2 == 'update' else 'Download '
                 menu.addAction(f"{tag}{m['name']} ({m['size_bytes'] / 1e6:.0f} MB)").triggered.connect(lambda _=False, e=m: self.start_download(e))
-            if menu.isEmpty():
-                self.set_status('All published models are already installed and up to date.')
-                return
             menu.exec(self.dl_btn.mapToGlobal(self.dl_btn.rect().bottomLeft()))
+
+        def show_dl_menu(self):
+            self.download_clicked()
 
         def start_download(self, entry):
             def work(prog):
                 return download_model(entry, self.upd, download_dir(self.spec), progress=prog)
             def done(path):
-                self.info = None
+                if self.info:                       # the downloaded file now matches the published one
+                    self.info = dict(self.info, models=[(m, 'current' if m is entry else st) for m, st in self.info['models']])
+                    self.show_update_note(self.info)
                 if entry.get('kind'):               # an extra file (e.g. the Auto-keep model): not a model for the picker
-                    self.dl_btn.setStyleSheet('' if self.model_path() else self.dl_btn.styleSheet())
                     getattr(self.panel, 'extras_changed', lambda: None)()
+                    self.update_dl_button()
                     self.set_status(f"Installed {entry['name']}. " + self.idle_msg)
                     return
                 self.refresh_models(select=str(path))
@@ -1283,6 +1685,30 @@ def _qt():
             hook = getattr(self.panel, 'cancel', None)
             if hook is not None:
                 hook()
+
+        def undo_all(self):
+            """Write back the image this window started with (keeps a Siril Undo state, so this can be undone too)."""
+            w = self.window()
+            start = getattr(w, 'start_image', None)
+            if start is None or self.busy:
+                return
+            data, meta = start
+            try:
+                if self.siril is not None:
+                    ident = write_result(self.siril, data, meta, w.orig_identity, f'{self.spec.name} {VERSION} undo all')
+                    self.siril.log(f'{self.spec.name}: Undo all - the image is back to how it was when the window opened.')
+                else:
+                    ident = fingerprint(data)
+            except Exception as e:
+                self.set_status(f'Undo all failed: {e}', True)
+                return
+            for v in w.views.values():
+                v.cache = None; v.pane_state = None; v.result = None
+            w.note_image(ident, data, show=True)
+            w.applied = False
+            for v in w.views.values():
+                v.undo_btn.setEnabled(False)
+            self.set_status('Undo all: the image is back to how it was when the window opened.')
 
         def read_image(self, kind):
             """-> (data, meta, identity, header_text, region note, rect)"""
@@ -1315,7 +1741,7 @@ def _qt():
                 return
             params = dict(self.panel.params())
             params.update(sp.image_params(htxt))
-            if kind == 'preview' and sp.has_editor:
+            if kind == 'edit' and sp.has_editor:
                 self.save_prefs()
                 self.panel.open_editor(self, data, meta, identity, params, path)
                 return
@@ -1357,7 +1783,7 @@ def _qt():
                             pass
                     else:
                         print(msg, flush=True)
-            self.job = dict(kind=kind, meta=meta, identity=identity, params=params, region=region, data=data, key=key, htxt=htxt, rect=rect, crop=crop)
+            self.job = dict(kind=kind, meta=meta, identity=identity, params=params, region=region, data=data, key=key, htxt=htxt, rect=rect, crop=crop, full=full)
             try:
                 extra = sp.prepare_job(self, self.job)
             except Exception as e:
@@ -1405,10 +1831,12 @@ def _qt():
                         job = dict(job, data=job['data'][sl])
                         info = dict(info, **{k: np.asarray(v)[sl] for k, v in info.items() if isinstance(v, np.ndarray) and v.ndim >= 2})
                     self.show_preview(out, info, job)
+                    QTimer.singleShot(0, getattr(self.panel, 'after_run', lambda: None))
                     if sp.reuse_preview and job['identity'] is not None:
                         self.cache = (job['identity'], job['key'], out, info, provider, note)
                     self.result = out
-                    self.set_status(f'Preview done in {secs:.1f} s. Ran on {provider}. The image was not changed.' + (' ' + extra if extra else ''))
+                    tail = (' Press Apply to Siril to write it.' if sp.inline_preview else ' The image was not changed.')
+                    self.set_status(f'{"Done" if sp.inline_preview else "Preview done"} in {secs:.1f} s. Ran on {provider}.' + tail + (' ' + extra if extra else ''))
                     return
                 label = f"{sp.name} {VERSION} {sp.label(job['params'])}"
                 write_out = sp.output(job['params'], out, info)
@@ -1417,6 +1845,8 @@ def _qt():
                 if self.siril is not None:
                     self.cache = None
                     self.job['identity'] = write_result(self.siril, write_out, job['meta'], job['identity'], label)
+                    getattr(self.window(), 'note_image', lambda *a, **k: None)(self.job['identity'], write_out, show=True)   # the pane shows the new image
+                    getattr(self.window(), 'mark_applied', lambda: None)()
                     msg = sp.post_apply(ctx, job['params'], info) or ''
                     self.siril.log(f'{label} done in {secs:.1f} s (Undo available).' + (' ' + msg if msg else ''))
                 H0, W0 = job['data'].shape[-2:]
@@ -1430,19 +1860,22 @@ def _qt():
 
         def show_preview(self, out, info, job):
             sp = self.spec
-            before = pool_for_display(job['data'])
-            after = pool_for_display(out)
+            before = pool_for_display(job['data'], PANE_SIDE)
+            after = pool_for_display(out, PANE_SIDE)
             flip = self.siril is not None
             sp_before = stretch_params(before)
             b8, a8 = to_rgb8(before, sp_before, flip), to_rgb8(after, sp_before, flip)
             alt8 = None
             if sp.alt and info.get(sp.alt[1]) is not None:
-                alt = pool_for_display(np.asarray(info[sp.alt[1]], np.float32))
-                alt8 = to_rgb8(alt, stretch_params(alt), flip)
+                alt = pool_for_display(np.asarray(info[sp.alt[1]], np.float32), PANE_SIDE)
+                alt8 = to_rgb8(alt, sp_before if getattr(sp, 'alt_same_stretch', False) else stretch_params(alt), flip)
             self.last_preview = (b8, a8, alt8)
-            if self.preview is None:
-                self.preview = PreviewWindow(sp)
-            self.preview.show_result(b8, a8, alt8, f'Preview of the {job["region"]}. Same auto-stretch for before and after.')
+            w = self.window()
+            getattr(w, 'note_image', lambda *a: None)(job.get('identity'), job.get('full'))
+            self.preview.set_alt(sp.alt[0] if sp.alt else None)
+            self.preview.size_note = f' · {job["data"].shape[-1]}×{job["data"].shape[-2]} px'
+            st = self.preview.show_result(b8, a8, alt8, f'Preview of the {job["region"]}. Same auto-stretch for before and after.')
+            self.pane_state = (getattr(w, 'orig_identity', job.get('identity')), st)
 
         def shutdown(self):
             for t in (self.worker, self.net):
@@ -1450,22 +1883,43 @@ def _qt():
                     if t is self.worker:
                         t.cancel_flag = True
                     t.wait(8000)
-            if self.preview is not None:
-                self.preview.close()
             getattr(self.panel, 'shutdown', lambda: None)()
 
     class MainWindow(QWidget):
+        """Like Umbra Guided GHS: a fixed-width controls column on the left (scrolls if a tool needs more room) and one zoomable image
+        pane on the right that shows the original until a tool has run.  The window keeps its size when you switch tools or models."""
+        LEFT_W = 400
+
         def __init__(self, specs, combined, siril=None, fake_image=None, smoke=False):
             super().__init__()
             self.specs = {s.key: s for s in specs}
             self.combined = combined
+            self.siril, self.fake = siril, fake_image
             self.setStyleSheet(STYLE)
-            self.setFixedWidth(380)
             self.views = {}
-            lay = QVBoxLayout(self)
+            self.orig_identity, self.orig_state = None, None
+            self.start_image, self.applied = None, False
+            outer = QHBoxLayout(self)
+            outer.setContentsMargins(0, 0, 0, 0)
+            outer.setSpacing(0)
+            left = QWidget()
+            left.setFixedWidth(self.LEFT_W)
+            ll = QVBoxLayout(left)
+            ll.setContentsMargins(0, 0, 0, 0)
+            ll.setSpacing(0)
+            content = QWidget()
+            lay = QVBoxLayout(content)
             lay.setContentsMargins(0, 0, 0, 0)
             lay.setSpacing(0)
-            lay.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)   # window height always follows its content (wrapped notes, hidden rows)
+            scroll = QScrollArea()
+            scroll.setWidget(content)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            ll.addWidget(scroll)
+            outer.addWidget(left)
+            self.pane = PreviewWindow()
+            outer.addWidget(self.pane, 1)
             if combined:
                 self.setWindowTitle('Umbra Astro AI (BETA)')
                 prefs = Prefs(SCRIPT_DIR / 'Umbra_Astro_AI_prefs.json', combined=True, enabled=not smoke)
@@ -1483,10 +1937,10 @@ def _qt():
                 row.addWidget(self.tool_box, 1)
                 tl.addLayout(row)
                 lay.addWidget(top)
+                self.top = top
                 self.stack = None
                 for s in specs:
-                    v = ToolView(s, siril, fake_image, prefs, combined_upd(specs),
-                                 show_title=False, smoke=smoke)
+                    v = ToolView(s, siril, fake_image, prefs, combined_upd(specs), show_title=False, smoke=smoke, pane=self.pane)
                     self.views[s.key] = v
                     lay.addWidget(v)
                     v.hide()
@@ -1495,35 +1949,103 @@ def _qt():
                 self.current_key = first if first in self.views else specs[0].key
                 self.tool_box.setCurrentIndex(self.tool_box.findData(self.current_key))
                 self.tool_box.currentIndexChanged.connect(lambda *_: self.switch(self.tool_box.currentData()))
-                self.switch(self.current_key, initial=True)
             else:
                 s = specs[0]
                 self.setWindowTitle(s.title)
                 self.current_key = s.key
-                v = ToolView(s, siril, fake_image, Prefs(SCRIPT_DIR / f'{s.script}_prefs.json', enabled=not smoke), show_title=True, smoke=smoke)
+                v = ToolView(s, siril, fake_image, Prefs(SCRIPT_DIR / f'{s.script}_prefs.json', enabled=not smoke), show_title=True, smoke=smoke, pane=self.pane)
                 self.views[s.key] = v
                 lay.addWidget(v)
+            # one width for every tool page (the widest one), so switching tools never moves the image pane
+            need = max([v.minimumSizeHint().width() for v in self.views.values()] + [self.LEFT_W]) + 10
+            left.setFixedWidth(need)
+            self.left_w = need
+            avail = QApplication.primaryScreen().availableGeometry()   # fit the screen, like Umbra Guided GHS
+            self.resize(min(1400, avail.width() - 40), min(900, avail.height() - 40))
+            self.setMinimumSize(self.left_w + 360, 520)
+            self.switch(self.current_key, initial=True)
+            QTimer.singleShot(0, self.load_original)
 
         def view(self):
             return self.views[self.current_key]
 
-        def refit(self):
+        def adjustSize(self):
+            """Tool pages ask for a refit when rows appear / disappear or a status wraps: the window keeps its size (the left column scrolls)."""
             if self.layout() is not None:
                 self.layout().activate()
+
+        def refit(self):
             self.adjustSize()
+
+        # ---- the original image in the pane
+        def load_original(self):
+            """Read the image (from Siril, or the test image) and show it in the pane, auto-stretched."""
+            try:
+                data, meta, identity, htxt = self.view().read_image('preview')
+            except Exception:
+                self.orig_identity, self.orig_state = None, None
+                self.pane.show_state(None)
+                return
+            if getattr(self, 'start_image', None) is None:          # for Undo all
+                self.start_image = (np.array(data, copy=True), meta)
+            self.note_image(identity, data, show=True)
+            self.view().activate()                                  # brushes etc. for the first page
+
+        def mark_applied(self):
+            self.applied = True
+            for v in self.views.values():
+                v.undo_btn.setEnabled(not v.busy)
+
+        def note_image(self, identity, data, show=False):
+            """Remember the current image (identity + display copy). show: put it in the pane now."""
+            if identity is None or data is None:
+                return
+            if identity != self.orig_identity or self.orig_state is None:
+                full = np.asarray(data, np.float32)
+                b = pool_for_display(full, PANE_SIDE)
+                b8 = to_rgb8(b, stretch_params(b), self.siril is not None)
+                p = QPixmap.fromImage(qimage(b8))
+                self.orig_identity = identity
+                self.orig_state = dict(pix={'before': p, 'after': p}, result=False, caption=f'Original · {full.shape[-1]}×{full.shape[-2]} px', note='')
+                self.check_image(full)
+            if show:
+                self.show_original()
+
+        def check_image(self, full):
+            """Tool pages that adapt to the image (Deblur: no stars -> Automatic PSF greyed out) check it in the background."""
+            self._checks = [t for t in getattr(self, '_checks', []) if t.isRunning()]
+            for v in self.views.values():
+                fn, cb = getattr(v.panel, 'image_check', None), getattr(v.panel, 'image_checked', None)
+                if fn is None or cb is None:
+                    continue
+                t = Task(lambda prog, fn=fn: fn(full))
+                t.done.connect(lambda r, cb=cb: cb(r))
+                t.failed.connect(lambda m: None)
+                self._checks.append(t)
+                t.start()
+
+        def show_original(self):
+            if self.orig_state is None:
+                self.pane.show_state(None)
+                return
+            self.pane.set_alt(None)
+            self.pane.show_state(dict(self.orig_state, keep_view=True))
 
         def switch(self, key, initial=False):
             if not initial:
                 self.view().save_prefs()
                 unload_engines()
             self.current_key = key
-            for k, v in self.views.items():           # only the current page is visible, so the window is exactly as tall as that page needs
+            for k, v in self.views.items():
                 v.setVisible(k == key)
-            self.refit()
-            QTimer.singleShot(0, self.refit)
-            self.view().save_prefs() if not initial else None
+            self.adjustSize()
+            if not initial:
+                self.views[key].activate()
+                self.view().save_prefs()
 
         def closeEvent(self, e):
+            for t in getattr(self, '_checks', []):
+                t.wait(10000)
             for v in self.views.values():
                 v.shutdown()
             try:
@@ -1533,7 +2055,7 @@ def _qt():
             super().closeEvent(e)
 
     _QT['ns'] = types.SimpleNamespace(**{k: v for k, v in locals().items() if k in (
-        'Worker', 'Task', 'PreviewWindow', 'Ui', 'ToolView', 'MainWindow', 'QApplication', 'QTimer', 'ModernComboBox', 'qimage')})
+        'Worker', 'Task', 'PreviewWindow', 'ZoomView', 'Ui', 'ToolView', 'MainWindow', 'QApplication', 'QTimer', 'ModernComboBox', 'qimage')})
     return _QT['ns']
 
 
@@ -1552,6 +2074,9 @@ def run_app(specs, combined, siril=None, fake=None, smoke=False, shots=None):
     q = _qt()
     app = q.QApplication.instance() or q.QApplication(sys.argv)
     win = q.MainWindow(specs, combined, siril, fake, smoke)
+    ts = os.environ.get('UMBRA_TEST_WINDOW', '')          # tests only: window size 'WxH'
+    if smoke and re.fullmatch(r'\d+x\d+', ts):
+        win.resize(*map(int, ts.split('x')))
     win.show()
     if not smoke:
         for v in win.views.values():
@@ -1599,6 +2124,9 @@ def run_app(specs, combined, siril=None, fake=None, smoke=False, shots=None):
             state['i'] += 1
             q.QTimer.singleShot(50, next_tool)
             return
+        if outdir:                                   # the pane before any run: the original
+            app.processEvents()
+            win.grab().save(str(outdir / f"{f'Umbra_Astro_AI_{key}' if combined else v.spec.script}_before.png"))
         v.start('preview')
         state['t0'] = time.time()
         q.QTimer.singleShot(250, lambda: poll(v, key))
@@ -1608,22 +2136,13 @@ def run_app(specs, combined, siril=None, fake=None, smoke=False, shots=None):
             q.QTimer.singleShot(250, lambda: poll(v, key))
             return
         ed = getattr(v.panel, 'ed', None)
-        if v.spec.has_editor:
-            ed.wait_idle()
-            ok = ed.res is not None and bool(np.isfinite(ed.res['out']).all()) and not v.busy
-            if ok:
-                ed.orig_btn.pressed.emit(); ok &= ed.holding; ed.orig_btn.released.emit(); ok &= not ed.holding
-                v.status.setText(f'Editor: Remove Stars {ed.timings.get("remove", 0):.1f} s, {ed.shape[1]}x{ed.shape[0]} px.')
-        else:
-            ok = v.last_error is None and v.result is not None and bool(np.isfinite(v.result).all()) and v.last_preview is not None
-        if ok and not v.spec.has_editor:
+        ok = v.last_error is None and v.result is not None and bool(np.isfinite(v.result).all()) and v.last_preview is not None
+        if ok:
             v.preview.orig_btn.pressed.emit(); ok &= v.preview.current_key() == 'before'; v.preview.orig_btn.released.emit(); ok &= v.preview.current_key() == 'after'
         print(f'UI TEST {key}: {"OK" if ok else "FAILED"} {v.status.text()}', flush=True)
         state['ok'] &= ok
         app.processEvents()
         snap(v, key)
-        if v.preview is not None:
-            v.preview.close()
         if ed is not None:
             ed.shutdown()
         state['i'] += 1
@@ -1761,7 +2280,7 @@ def _engine_deblur():
     params (all optional):
       sharpening      0-8, default 3.0 (models with the Sharpening control: v1.0, v1.1 experimental, legacy fb / fs / umbra_deconvolution_*)
       strength        0-1, default 0.5 (older single-strength models only)
-      correct_only    bool, default False: Correct Only (strength, star and halo forced to 0, sharpening 0)
+      correct_only    bool, default False: Aberration Removal Only (strength, star and halo forced to 0, sharpening 0)
       fwhm            None = Automatic PSF, else the PSF diameter in pixels
       star, halo      0-1, default 0 (Sharpen Stars / Halo Reduction)
       drizzled        None / bool: True raises the noise estimate for correlated (drizzled) noise
@@ -1968,6 +2487,22 @@ def _engine_deblur():
         return dict(fmap=maps[0], gl=gl, grid=grid[0], shape=maps[1:], n=n_iso)
 
 
+    def psf_check(y, max_side=3000):
+        """Can Automatic PSF measure stars in this image?  y (C,H,W) linear.  Measured on the central max_side x max_side crop (density is per
+        megapixel, so a crop gives the same answer, much faster).  -> dict(ok, density (isolated stars per MP), fwhm)."""
+        Y = np.nan_to_num(np.asarray(y, np.float32))
+        if Y.ndim == 2:
+            Y = Y[None]
+        if Y.shape[0] == 1:
+            Y = np.repeat(Y, 3, 0)
+        H, W = Y.shape[-2:]
+        y0, x0 = max(0, (H - max_side) // 2), max(0, (W - max_side) // 2)
+        Y = np.ascontiguousarray(Y[:, y0:y0 + max_side, x0:x0 + max_side])
+        p = measure_psf(Y)
+        dens = p['n'] / max(Y.shape[-1] * Y.shape[-2] / 1e6, 1e-6)
+        return dict(ok=not (p['gl'] > AUTO_PSF_MAX or dens < STARLESS_DENSITY), density=float(dens), fwhm=float(p['gl']))
+
+
     def auto_psf(Y0, fwhm=None):
         """Automatic PSF (with the starless guard) or manual FWHM -> (fmap, global, grid, emap, psf_note)."""
         p = measure_psf(Y0)
@@ -2031,7 +2566,7 @@ def _engine_deblur():
 
 
     def deconvolve_chw(net, y, strength=1.0, fwhm=None, progress=None, star=0.0, halo=0.0, two_pass=True):
-        """Correct Only first, then the requested sharpening (single-strength models / Sharpening 0)."""
+        """Aberration Removal Only first, then the requested sharpening (single-strength models / Sharpening 0)."""
         if two_pass and (strength > 0 or star > 0 or halo > 0):
             yc, _ = deconvolve_once(net, y, 0.0, fwhm, None, 0.0, 0.0)
             return deconvolve_once(net, yc, strength, fwhm, progress, star, halo)
@@ -2196,7 +2731,7 @@ def _engine_deblur():
 
 
     def pass_plan(v):
-        """Sharpening v (0..8, steps of 0.25) -> list of per-pass strengths after Correct Only: floor(v) x 1.0, then frac(v) if > 0."""
+        """Sharpening v (0..8, steps of 0.25) -> list of per-pass strengths after Aberration Removal Only: floor(v) x 1.0, then frac(v) if > 0."""
         v = max(0.0, min(8.0, round(float(v) * 4) / 4))
         n, f = int(v), v - int(v)
         return [1.0] * n + ([round(f, 4)] if f > 1e-6 else [])
@@ -2204,8 +2739,8 @@ def _engine_deblur():
 
     def deconvolve_array(model, data, strength, fwhm, progress=None, star=0.0, halo=0.0, sharpening=None, drizzled=None, finedetail=False, star_model=None):
         """data HxW, CxHxW (C = 1 or 3) or HxWxC (C = 1 or 3) float32 -> (same shape, info). Mono is replicated to 3 channels and averaged back.
-        sharpening None (older models): Correct Only + one sharpen pass at `strength` (0.0.6 behaviour).
-        sharpening v (fb models; `strength` ignored): Correct Only once, then the passes of pass_plan(v) (Sharpen Stars / Halo Reduction on the
+        sharpening None (older models): Aberration Removal Only + one sharpen pass at `strength` (0.0.6 behaviour).
+        sharpening v (fb models; `strength` ignored): Aberration Removal Only once, then the passes of pass_plan(v) (Sharpen Stars / Halo Reduction on the
         last pass); 0.0.11: the PSF is measured once and scheduled per pass (udc.infer.deconvolve_scheduled); every pass is tiled like a single pass (same memory)."""
         data = np.asarray(data, np.float32)
         layout = 'hw'
@@ -2223,10 +2758,10 @@ def _engine_deblur():
         plan = None if sharpening is None else pass_plan(sharpening)
         if plan is None or not plan:
             out, info = deconvolve_chw(model, y, strength=float(strength) if plan is None else 0.0, fwhm=fw, progress=progress,
-                                       star=float(star), halo=float(halo))           # older models, or Sharpening 0 (= Correct Only)
+                                       star=float(star), halo=float(halo))           # older models, or Sharpening 0 (= Aberration Removal Only)
         else:
             P = len(plan)
-            def prog(k, n, t):                                                 # progress per pass: (pass, tile) over Correct Only + P passes
+            def prog(k, n, t):                                                 # progress per pass: (pass, tile) over Aberration Removal Only + P passes
                 if progress: progress(k * t + n, (P + 1) * t)
             if star_model is not None:                                         # 0.0.12 Protect star shapes: stars from star_model, rest from the fine-detail model
                 out, info = deconvolve_scheduled(star_model, y, plan, fw, progress=prog, star=float(star), halo=float(halo), drizzled=drizzled,
@@ -2319,11 +2854,11 @@ ENGINES['deblur'] = _engine_deblur()
 def _tool_deblur():
     # ---- Umbra Deblur: tool layer (panel, CLI flags, labels) ----
     SHARP_DEFAULT = 3.0
-    STRENGTH_TIP = 'How far to sharpen toward the sampling limit; always limited by the noise. 0 = Correct Only.'
+    STRENGTH_TIP = 'How far to sharpen toward the sampling limit; always limited by the noise. 0 = Aberration Removal Only.'
     STAR_TIP = 'Shrinks stars toward the sampling limit (noise-limited). Only this slider changes star size.'
     HALO_TIP = 'Pulls star halos in; their light goes back into the star core (brightness kept).'
     CORRECT_TIP = 'Fixes star shapes (aberrations) without sharpening. Switches the other sliders off.'
-    SHARP_TIP = ('Number of sharpening passes (PSF re-measured each time); 2.5 = 2 passes + a half-strength pass. 0 = Correct Only. '
+    SHARP_TIP = ('Number of sharpening passes (PSF re-measured each time); 2.5 = 2 passes + a half-strength pass. 0 = Aberration Removal Only. '
                  'Umbra Deblur v1.0: every step is sharper than the last; 8 is the strongest; cleaner dark dust lanes. '
                  'v1.1 (experimental): sharper fine strands, less beading; sky mask on automatically; may keep slight coma tails on bright '
                  'corner stars unless Protect star shapes is ticked. v1.0 stays the default. Images differ, so judge by eye.')
@@ -2342,7 +2877,7 @@ def _tool_deblur():
             self.ui, self.host = ui, host
             self.fb = True
             self.finedetail = False
-            self.correct = ui.check(layout, 'Correct Only', CORRECT_TIP)
+            self.correct = ui.check(layout, 'Aberration Removal Only', CORRECT_TIP)
             self.strength = ui.slider(layout, 'Strength', 0, 100, 50, lambda v: f'{v}%', STRENGTH_TIP)
             self.sharp = ui.slider(layout, 'Sharpening', 0, 32, int(SHARP_DEFAULT * 4), lambda v: f'{v / 4:.2f}', SHARP_TIP)   # 0..8 in 0.25 steps
             self.protect = ui.check(layout, 'Protect star shapes (slower)', PROTECT_TIP)
@@ -2350,8 +2885,31 @@ def _tool_deblur():
             self.psf = ui.slider(layout, 'PSF Diameter (px)', 15, 100, 30, lambda v: f'{v / 10:.1f}', PSF_TIP)
             self.star = ui.slider(layout, 'Sharpen Stars', 0, 100, 0, lambda v: f'{v}%', STAR_TIP)
             self.halo = ui.slider(layout, 'Halo Reduction', 0, 100, 0, lambda v: f'{v}%', HALO_TIP)
+            self.no_stars = None                 # set from the background star check when an image is loaded
+            self.auto_pref = True                # the user's own Automatic PSF choice (kept while the box is greyed out)
+            self.auto_tip = self.auto.toolTip()
             self.correct.toggled.connect(lambda _=False: self.update())
-            self.auto.toggled.connect(lambda _=False: self.update())
+            self.auto.toggled.connect(lambda c: (setattr(self, 'auto_pref', bool(c)) if self.auto.isEnabled() else None, self.update()))
+            self.update()
+
+        # background check when the window loads an image (MainWindow calls image_check in a worker thread, then image_checked)
+        def image_check(self, data):
+            x = np.asarray(data, np.float32)
+            if x.ndim == 3 and x.shape[-1] in (1, 3) and x.shape[0] not in (1, 3):
+                x = np.moveaxis(x, -1, 0)
+            return ENGINES['deblur'].psf_check(x)
+
+        def image_checked(self, res):
+            self.no_stars = not res['ok']
+            if self.no_stars:
+                self.auto.blockSignals(True); self.auto.setChecked(False); self.auto.blockSignals(False)
+                self.auto.setEnabled(False)
+                self.auto.setToolTip(f"No stars found ({res['density']:.0f} isolated stars per megapixel): Automatic PSF needs stars with the current "
+                                     'models. Set the PSF Diameter by hand (measure it on the version of the image with stars).')
+            else:
+                self.auto.setEnabled(True)
+                self.auto.setToolTip(self.auto_tip)
+                self.auto.blockSignals(True); self.auto.setChecked(self.auto_pref); self.auto.blockSignals(False)
             self.update()
 
         def update(self):
@@ -2389,7 +2947,7 @@ def _tool_deblur():
 
         def settings(self):
             return dict(correct=self.correct.isChecked(), strength=self.strength.value(), sharp=self.sharp.value(), protect=self.protect.isChecked(),
-                        auto=self.auto.isChecked(), psf=self.psf.value(), star=self.star.value(), halo=self.halo.value())
+                        auto=self.auto_pref, psf=self.psf.value(), star=self.star.value(), halo=self.halo.value())
 
         def set_settings(self, d):
             for k, w in (('strength', self.strength), ('sharp', self.sharp), ('psf', self.psf), ('star', self.star), ('halo', self.halo)):
@@ -2398,6 +2956,8 @@ def _tool_deblur():
             for k, w in (('correct', self.correct), ('protect', self.protect), ('auto', self.auto)):
                 if isinstance(d.get(k), bool):
                     w.setChecked(d[k])
+            if isinstance(d.get('auto'), bool):
+                self.auto_pref = d['auto']
             self.update()
 
 
@@ -2410,7 +2970,7 @@ def _tool_deblur():
             ap.add_argument('--sharpening', type=float, help='deblur: passes 0..8 in steps of 0.25 (default 3; 2.5 = 2 passes + half pass)')
             ap.add_argument('--stars', type=float, default=0.0, help='deblur: Sharpen Stars 0..1 (default 0)')
             ap.add_argument('--halo', type=float, default=0.0, help='deblur: Halo Reduction 0..1 (default 0)')
-            ap.add_argument('--correct-only', action='store_true', help='deblur: force strength, sharpening, stars and halo to 0')
+            ap.add_argument('--correct-only', action='store_true', help='deblur: Aberration Removal Only (force strength, sharpening, stars and halo to 0)')
             ap.add_argument('--fwhm', type=float, help='deblur: manual PSF FWHM in px (default: automatic)')
             ap.add_argument('--protect-stars', action='store_true', help='deblur: v1.1 only: star shapes from v1.0 (~2x slower)')
 
